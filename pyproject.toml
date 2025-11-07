@@ -1,0 +1,38 @@
+[project]
+name = "sid-gr"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pandas>=2.3.3",
+    "sentencepiece>=0.2.1",
+    "torch==2.6.0",
+    "torchvision==0.21.0",
+    "torchaudio==2.6.0",
+    "sentence-transformers>=5.1.1",
+    "pyarrow>=21.0.0",
+    "fastparquet>=2024.11.0",
+    "modelscope>=1.30.0",
+    "numpy>=2.2.6",
+    "tensorflow>=2.20.0",
+    "tf-keras>=2.20.1",
+    "torch-geometric>=2.7.0",
+]
+
+[[tool.uv.index]]
+# url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+# default = true
+
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true
+
+
+[tool.uv.sources]
+torch = [
+  { index = "pytorch-cu124", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+torchvision = [
+  { index = "pytorch-cu124", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
