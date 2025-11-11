@@ -10,6 +10,7 @@ This script trains tokenizers on processed Amazon dataset with item embeddings.
 """
 
 import os
+import subprocess
 import argparse
 import logging
 import json
@@ -237,16 +238,6 @@ class TokenizerTrainer:
             self.logger.info(f"  Normalize residuals: {model.normalize_residuals} {'(CRITICAL for stability!)' if model.normalize_residuals else '(WARNING: May cause collapse!)'}")
             self.logger.info(f"  Activation: SiLU (optimized)")
             
-        # elif mode == 'kmeans':
-        #     model = RQKMeans(
-        #         n_clusters=self.config.get('n_clusters', 512),
-        #         n_features=embedding_dim,
-        #         n_layers=self.config.get('n_layers', 4),
-        #         max_iters=self.config.get('max_iters', 100),
-        #         init_method=self.config.get('init_method', 'kmeans++')
-        #     )
-        #     self.logger.info("Created RQ-KMeans model")
-            
         else:
             raise ValueError(f"Unknown mode: {mode}")
             
@@ -316,11 +307,13 @@ class TokenizerTrainer:
             epoch_stats = {
                 'epoch': epoch, 'total_loss': 0, 'recon_loss': 0, 'vq_loss': 0,
                 'codebook_loss': 0, 'commitment_loss': 0, 'codebook_usage': 0,
-                'duplicate_rate_pre': 0, 'duplicate_rate_post': 0
+                'duplicate_rate_pre': 0
             }
             num_batches = 0
             
             progress_bar = tqdm(dataloader, desc=f'Epoch {epoch+1}/{self.config["epochs"]}')
+            # Accumulate per-layer code counts to compute entropy/perplexity and used codes
+            per_layer_code_counts = [torch.zeros(model.n_embed, dtype=torch.long) for _ in range(model.n_layers)]
             
             for batch in progress_bar:
                 embeddings = batch['embedding'].to(self.device)
@@ -361,7 +354,6 @@ class TokenizerTrainer:
                 epoch_stats['commitment_loss'] += outputs['commitment_loss'].item()
                 epoch_stats['codebook_usage'] += outputs['codebook_usage']
                 epoch_stats['duplicate_rate_pre'] += outputs['duplicate_rate_pre']
-                epoch_stats['duplicate_rate_post'] += outputs['duplicate_rate_post']
                 
                 # EBODA-style detailed monitoring (computed per batch)
                 with torch.no_grad():
@@ -376,6 +368,10 @@ class TokenizerTrainer:
                         if key not in epoch_stats:
                             epoch_stats[key] = 0
                         epoch_stats[key] += usage
+                        
+                        # Accumulate histogram for entropy/perplexity/used codes
+                        counts = torch.bincount(layer_codes.view(-1), minlength=model.n_embed)
+                        per_layer_code_counts[layer_idx] += counts.cpu()
                 
                 num_batches += 1
                 
@@ -395,8 +391,25 @@ class TokenizerTrainer:
             
             # Record current temperature
             epoch_stats['temperature'] = temperature
-            
-            training_stats.append(epoch_stats)
+            # Record current learning rate
+            current_lr = optimizer.param_groups[0]['lr']
+            epoch_stats['lr'] = float(current_lr)
+            # Compute per-layer used codes, entropy and perplexity
+            for layer_idx in range(model.n_layers):
+                counts = per_layer_code_counts[layer_idx].float()
+                total = counts.sum().item()
+                if total > 0:
+                    p = counts / total
+                    entropy = -(p[p > 0] * torch.log(p[p > 0] + 1e-10)).sum().item()
+                    used_codes = int((counts > 0).sum().item())
+                    perplexity = float(torch.exp(torch.tensor(entropy)).item())
+                else:
+                    entropy = 0.0
+                    used_codes = 0
+                    perplexity = 0.0
+                epoch_stats[f'layer_{layer_idx}_used_codes'] = used_codes
+                epoch_stats[f'layer_{layer_idx}_entropy'] = entropy
+                epoch_stats[f'layer_{layer_idx}_perplexity'] = perplexity
             
             # Step scheduler (per-epoch for epoch-based schedulers)
             if scheduler and not isinstance(scheduler, (WarmupCosineScheduler if SCHEDULERS_AVAILABLE else type(None))):
@@ -436,7 +449,7 @@ class TokenizerTrainer:
             )
             self.logger.info(
                 f"  Codebook usage (avg): {epoch_stats['codebook_usage']:.4f}, "
-                f"Temp={epoch_stats['temperature']:.4f}"
+                f"Temp={epoch_stats['temperature']:.4f}, LR={epoch_stats['lr']:.6f}"
             )
             
             # Log per-layer codebook usage (EBODA-style)
@@ -446,10 +459,19 @@ class TokenizerTrainer:
             ])
             self.logger.info(f"  Per-layer usage: {usage_str}")
             
-            self.logger.info(
-                f"  Duplicate rates - Pre: {epoch_stats['duplicate_rate_pre']:.4f}, "
-                f"Post: {epoch_stats['duplicate_rate_post']:.4f}"
-            )
+            self.logger.info(f"  Duplicate rate (pre): {epoch_stats['duplicate_rate_pre']:.4f}")
+            
+            # Log per-layer used codes and perplexity
+            per_layer_used = ", ".join([
+                f"L{i}={epoch_stats.get(f'layer_{i}_used_codes', 0)}/{model.n_embed}"
+                for i in range(model.n_layers)
+            ])
+            self.logger.info(f"  Per-layer used codes: {per_layer_used}")
+            per_layer_ppl = ", ".join([
+                f"L{i}={epoch_stats.get(f'layer_{i}_perplexity', 0):.2f}"
+                for i in range(model.n_layers)
+            ])
+            self.logger.info(f"  Per-layer perplexity: {per_layer_ppl}")
             
             # Log EBODA-style diversity metrics
             if 'p_unique_ids' in epoch_stats:
@@ -477,20 +499,68 @@ class TokenizerTrainer:
                 layer_usage = [eval_stats.get(f'layer_{i}_usage', 0) for i in range(model.n_layers)]
                 usage_str = ", ".join([f"L{i}={u:.3f}" for i, u in enumerate(layer_usage)])
                 self.logger.info(f"  Layer usage: {usage_str}")
+                
+                # Log per-layer used codes and perplexity (eval)
+                layer_used = ", ".join([
+                    f"L{i}={eval_stats.get(f'layer_{i}_used_codes', 0)}/{model.n_embed}"
+                    for i in range(model.n_layers)
+                ])
+                self.logger.info(f"  Layer used codes: {layer_used}")
+                layer_ppl = ", ".join([
+                    f"L{i}={eval_stats.get(f'layer_{i}_perplexity', 0):.2f}"
+                    for i in range(model.n_layers)
+                ])
+                self.logger.info(f"  Layer perplexity: {layer_ppl}")
             
-            # Early stopping check (use validation loss if available, else training loss)
-            check_loss = eval_stats.get('loss', epoch_stats['total_loss'])
+            # Merge eval stats into epoch_stats and append epoch record
+            if eval_stats:
+                for k, v in eval_stats.items():
+                    epoch_stats[f'eval_{k}'] = v
+            training_stats.append(epoch_stats)
+            
+            # Early stopping check
+            # Rule:
+            # - If eval_split is enabled: ONLY check/improve/increment patience on eval epochs,
+            #   and use eval loss for the metric.
+            # - If eval_split is disabled: use training loss every epoch.
             if early_stop_patience > 0:
-                if best_loss - check_loss > early_stop_min_delta:
-                    best_loss = check_loss
-                    patience_counter = 0
-                    self.logger.info(f"  ✓ New best loss: {best_loss:.4f}")
+                eval_enabled = eval_dataloader is not None and self.config.get('eval_split', False)
+                is_eval_epoch = (epoch + 1) % self.config.get('eval_every', 10) == 0
+                
+                if eval_enabled:
+                    if is_eval_epoch:
+                        # Use eval loss on eval epochs
+                        if 'loss' in eval_stats:
+                            check_loss = eval_stats['loss']
+                        else:
+                            check_loss = epoch_stats['total_loss']
+                        
+                        if best_loss - check_loss > early_stop_min_delta:
+                            best_loss = check_loss
+                            patience_counter = 0
+                            self.logger.info(f"  ✓ New best eval loss: {best_loss:.4f}")
+                        else:
+                            patience_counter += 1
+                            if patience_counter >= early_stop_patience:
+                                self.logger.info(f"\n⚠ Early stopping triggered after {epoch+1} epochs")
+                                self.logger.info(f"  Eval loss has not improved for {early_stop_patience} eval checks")
+                                break
+                    else:
+                        # Skip patience update on non-eval epochs when eval_split is enabled
+                        pass
                 else:
-                    patience_counter += 1
-                    if patience_counter >= early_stop_patience:
-                        self.logger.info(f"\n⚠ Early stopping triggered after {epoch+1} epochs")
-                        self.logger.info(f"  Loss has not improved for {early_stop_patience} epochs")
-                        break
+                    # No eval: use training loss every epoch
+                    check_loss = epoch_stats['total_loss']
+                    if best_loss - check_loss > early_stop_min_delta:
+                        best_loss = check_loss
+                        patience_counter = 0
+                        self.logger.info(f"  ✓ New best train loss: {best_loss:.4f}")
+                    else:
+                        patience_counter += 1
+                        if patience_counter >= early_stop_patience:
+                            self.logger.info(f"\n⚠ Early stopping triggered after {epoch+1} epochs")
+                            self.logger.info(f"  Train loss has not improved for {early_stop_patience} epochs")
+                            break
             
             # Save checkpoint
             if (epoch + 1) % self.config.get('save_every', 10) == 0:
@@ -499,7 +569,6 @@ class TokenizerTrainer:
                 self.save_checkpoint(model, optimizer, epoch, combined_stats)
         
         return {'training_stats': training_stats}
-    
     
     
     def evaluate(self, model, dataloader, temperature: float = 0.2) -> Dict[str, float]:
@@ -523,6 +592,8 @@ class TokenizerTrainer:
         num_batches = 0
         
         all_codes = []
+        # Per-layer histograms for used codes / entropy / perplexity
+        per_layer_code_counts = [torch.zeros(model.n_embed, dtype=torch.long) for _ in range(model.n_layers)]
         
         with torch.no_grad():
             for batch in dataloader:
@@ -541,6 +612,13 @@ class TokenizerTrainer:
                 # Collect codes for diversity metrics
                 all_codes.append(outputs['codes'])
                 num_batches += 1
+                
+                # Accumulate histograms
+                codes = outputs['codes']
+                for layer_idx in range(model.n_layers):
+                    layer_codes = codes[:, layer_idx]
+                    counts = torch.bincount(layer_codes.view(-1), minlength=model.n_embed)
+                    per_layer_code_counts[layer_idx] += counts.cpu()
                 
                 # Limit evaluation batches for speed
                 if num_batches >= 50:
@@ -571,6 +649,23 @@ class TokenizerTrainer:
                 unique_layer_codes = torch.unique(layer_codes)
                 usage = len(unique_layer_codes) / model.n_embed
                 eval_stats[f'layer_{layer_idx}_usage'] = usage
+        
+        # Per-layer used codes, entropy, perplexity on eval set
+        for layer_idx in range(model.n_layers):
+            counts = per_layer_code_counts[layer_idx].float()
+            total = counts.sum().item()
+            if total > 0:
+                p = counts / total
+                entropy = -(p[p > 0] * torch.log(p[p > 0] + 1e-10)).sum().item()
+                used_codes = int((counts > 0).sum().item())
+                perplexity = float(torch.exp(torch.tensor(entropy)).item())
+            else:
+                entropy = 0.0
+                used_codes = 0
+                perplexity = 0.0
+            eval_stats[f'layer_{layer_idx}_used_codes'] = used_codes
+            eval_stats[f'layer_{layer_idx}_entropy'] = entropy
+            eval_stats[f'layer_{layer_idx}_perplexity'] = perplexity
         
         return eval_stats
     
@@ -806,6 +901,14 @@ def parse_args():
     parser.add_argument('--device', type=str, default='auto',
                        help='Device to use (auto/cpu/cuda, default: auto)')
     
+    # Evaluation arguments
+    parser.add_argument('--eval_split', action='store_true', default=False,
+                       help='Enable evaluation on a validation split during training (default: False)')
+    parser.add_argument('--eval_every', type=int, default=10,
+                       help='Run evaluation every N epochs when eval_split is enabled (default: 10)')
+    parser.add_argument('--max_eval_items', type=int, default=5000,
+                       help='Maximum number of items to load for evaluation (default: 5000)')
+    
     # Model arguments (TIGER paper defaults)
     parser.add_argument('--n_layers', type=int, default=3,
                        help='Number of quantization layers (default: 3, TIGER paper)')
@@ -855,6 +958,10 @@ def parse_args():
     parser.add_argument('--temperature_anneal_rate', type=float, default=0.00003,
                        help='Temperature annealing rate (default: 0.00003)')
     
+    # Visualization toggle (external script)
+    parser.add_argument('--visualize', action='store_true', default=False,
+                       help='Run external visualization after training (loss curves, t-SNE, prefix stats)')
+    
     # Other arguments
     parser.add_argument('--max_items', type=int, default=None,
                        help='Maximum number of items to use (for testing)')
@@ -886,6 +993,9 @@ def main():
         'batch_size': args.batch_size,
         'learning_rate': args.learning_rate,
         'device': args.device if args.device != 'auto' else ('cuda' if torch.cuda.is_available() else 'cpu'),
+        'eval_split': args.eval_split,
+        'eval_every': args.eval_every,
+        'max_eval_items': args.max_eval_items,
         'n_layers': args.n_layers,
         'n_embed': args.n_embed,
         'n_clusters': args.n_clusters,
@@ -922,6 +1032,23 @@ def main():
         json.dump(results, f, indent=2, default=str)
     
     print(f"Training completed! Results saved to {args.output_dir}")
+    
+    # Optionally run external visualization
+    if args.visualize:
+        viz_script = os.path.join(os.path.dirname(__file__), 'visualize_tokenizer.py')
+        if os.path.exists(viz_script):
+            try:
+                subprocess.run([
+                    'python', viz_script,
+                    '--output_dir', args.output_dir,
+                    '--data_path', args.data_path,
+                    '--embedding_file', args.embedding_file
+                ], check=True)
+                print("Visualization completed.")
+            except Exception as e:
+                print(f"Visualization failed: {e}")
+        else:
+            print(f"Visualization script not found: {viz_script}")
 
 
 if __name__ == '__main__':

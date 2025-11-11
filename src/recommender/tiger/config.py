@@ -318,8 +318,8 @@ def get_beauty_config(
         Dictionary containing all configurations
     """
     default_paths = {
-        'sequence_data_path': "dataset/Amazon-Beauty/processed/beauty-tiger-sentenceT5base/Beauty",
-        'semantic_mapping_path': "scripts/output/tiger_tokenizer/beauty/3-256-32-ema-only-5-core-items-old-post-deduplication-500epo/semantic_id_mappings.json"
+        'sequence_data_path': "dataset/Amazon-Beauty/processed/beauty-hidvae-sentenceT5base/Beauty",
+        'semantic_mapping_path': "scripts/output/hidvae_tokenizer/beauty/3-256-32-hidvae-multimodal-v2/semantic_id_mappings.json"
     }
     
     return _create_dataset_config(

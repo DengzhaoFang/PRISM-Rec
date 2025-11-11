@@ -22,7 +22,7 @@ MODEL_TYPE="t5-tiny"
 
 # Output directory keywords (optional, for custom naming)
 # Example: "baseline-experiment" will create dir like "2025-11-06-17-26-56_baseline-experiment"
-OUTPUT_KEYWORDS="3layer-old-post-deduplication-300epoch-lr5e-4-no-scheduler"
+OUTPUT_KEYWORDS="3layer-hidvae-tokenizer-v2"
 
 # ============================================================
 # Learning Rate Scheduler
@@ -34,7 +34,7 @@ OUTPUT_KEYWORDS="3layer-old-post-deduplication-300epoch-lr5e-4-no-scheduler"
 #   - 'exponential': Exponential decay
 #   - 'step': Step decay (reduce every N epochs)
 # Set to empty string ("") to use default from config.py
-LR_SCHEDULER="none"
+LR_SCHEDULER="warmup_cosine"
 
 # ============================================================
 # Verbose Logging
