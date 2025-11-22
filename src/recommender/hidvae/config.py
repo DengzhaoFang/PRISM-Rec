@@ -25,7 +25,13 @@ class ModelConfig:
     
     # Semantic code parameters
     num_code_layers: int = 4  # Number of RQ-VAE layers
-    codebook_size: int = 256  # Size of each codebook
+    codebook_size: int = 256  # Default size of each codebook (used if codebook_sizes is None)
+    codebook_sizes: Optional[List[int]] = None  # Variable codebook sizes per layer (e.g., [128, 256, 512])
+    
+    # Tag token parameters (for predict_tags_first feature)
+    tag_token_offset: int = 0  # Offset where tag tokens start in vocab
+    num_tag_tokens: int = 0  # Number of tag tokens
+    max_tag_ids_per_layer: Optional[List[int]] = None  # Max tag ID for each layer
     
     # Vocabulary size (will be set dynamically based on actual data)
     _vocab_size: Optional[int] = None
@@ -48,7 +54,12 @@ class ModelConfig:
             return self._vocab_size
         else:
             # Theoretical maximum (may waste some embedding space)
-            return self.num_code_layers * self.codebook_size + 1
+            if self.codebook_sizes is not None:
+                # Variable codebook sizes: 1 + sum(codebook_sizes)
+                return 1 + sum(self.codebook_sizes)
+            else:
+                # Uniform codebook size
+                return self.num_code_layers * self.codebook_size + 1
     
     @property
     def pad_token_id(self) -> int:
@@ -124,7 +135,7 @@ def get_model_config(model_type: str = "default") -> ModelConfig:
             d_ff=2048,
             num_heads=8,
             d_kv=64,
-            dropout_rate=0.15, 
+            dropout_rate=0.1, 
             feed_forward_proj="relu"
         )
 
@@ -141,6 +152,7 @@ class DataConfig:
     dataset_name: str
     sequence_data_path: str
     semantic_mapping_path: str
+    collab_embedding_path: Optional[str] = None  # NEW: Path to collaborative embeddings
     max_seq_length: int = 20
     
     def __post_init__(self):
@@ -149,6 +161,8 @@ class DataConfig:
             raise ValueError(f"Sequence data path does not exist: {self.sequence_data_path}")
         if not os.path.exists(self.semantic_mapping_path):
             raise ValueError(f"Semantic mapping path does not exist: {self.semantic_mapping_path}")
+        if self.collab_embedding_path and not os.path.exists(self.collab_embedding_path):
+            raise ValueError(f"Collaborative embedding path does not exist: {self.collab_embedding_path}")
 
 
 @dataclass
@@ -195,6 +209,57 @@ class TrainingConfig:
     
     # Reproducibility
     seed: int = 42
+    
+    # ============================================================
+    # NEW FEATURES: Multi-source Information Fusion
+    # ============================================================
+    
+    # Feature 1: Codebook Vector Warm-start for ID Embeddings
+    use_codebook_warmstart: bool = False
+    codebook_warmstart_freeze: bool = False  # Whether to freeze warmstarted embeddings
+    
+    # Feature 2: Codebook Vector Prediction Loss
+    use_codebook_prediction: bool = False
+    codebook_prediction_weight: float = 0.1  # Loss weight for codebook prediction
+    
+    # Feature 3: Tag ID Prediction Loss
+    use_tag_prediction: bool = False
+    tag_prediction_weight: float = 0.1  # Loss weight for tag prediction
+    predict_tags_first: bool = False  # Whether to predict tags before semantic IDs
+    
+    # Feature 4: Multi-source Embedding Fusion
+    use_multimodal_fusion: bool = False
+    fusion_gate_type: str = "learned"  # Options: "learned", "fixed", "attention"
+    content_emb_weight: float = 0.5  # Fixed weight for content (if fusion_gate_type="fixed")
+    collab_emb_weight: float = 0.3  # Fixed weight for collab (if fusion_gate_type="fixed")
+    id_emb_weight: float = 0.2  # Fixed weight for ID (if fusion_gate_type="fixed")
+    freeze_content_emb: bool = False  # Freeze content embeddings
+    freeze_collab_emb: bool = False  # Freeze collaborative embeddings
+    use_layer_specific_fusion: bool = False  # Use layer-specific projections for fusion
+    
+    # ============================================================
+    # NEW FEATURES: Structural Improvements
+    # ============================================================
+    
+    # Feature 5: Dynamic Batching (reduces padding waste)
+    use_dynamic_batching: bool = False
+    
+    # Feature 6: Item/Layer Position Embeddings
+    use_item_layer_emb: bool = False
+    use_temporal_decay: bool = True  # Add temporal decay to item positions
+    
+    # Feature 7: Hierarchical Attention (item-level and layer-level)
+    use_hierarchical_attn: bool = False
+    use_item_attention: bool = True  # Inter-item and intra-item attention
+    use_layer_attention: bool = True  # Layer-level attention
+    
+    # ============================================================
+    # NEW FEATURE: Trie-Constrained Decoding
+    # ============================================================
+    
+    # Feature 8: Trie-Constrained Decoding
+    # Ensures every decoding step points to a path that can lead to a real item
+    use_trie_constraints: bool = False  # Enable Trie-constrained decoding
 
 
 def _create_dataset_config(
@@ -227,15 +292,16 @@ def _create_dataset_config(
     # Set default paths
     sequence_data_path = sequence_data_path or default_paths['sequence_data_path']
     semantic_mapping_path = semantic_mapping_path or default_paths['semantic_mapping_path']
+    collab_embedding_path = kwargs.get('collab_embedding_path') or default_paths.get('collab_embedding_path')
     
     if output_dir is None:
         timestamp = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
         # Add output_keywords to directory name if provided
         output_keywords = kwargs.get('output_keywords', None)
         if output_keywords:
-            output_dir = f"scripts/output/recommender/tiger/{dataset_name}/{timestamp}_{output_keywords}"
+            output_dir = f"scripts/output/recommender/hidvae/{dataset_name}/{timestamp}_{output_keywords}"
         else:
-            output_dir = f"scripts/output/recommender/tiger/{dataset_name}/{timestamp}"
+            output_dir = f"scripts/output/recommender/hidvae/{dataset_name}/{timestamp}"
     
     checkpoint_dir = checkpoint_dir or output_dir
     
@@ -247,18 +313,19 @@ def _create_dataset_config(
         dataset_name=dataset_name,
         sequence_data_path=sequence_data_path,
         semantic_mapping_path=semantic_mapping_path,
+        collab_embedding_path=collab_embedding_path,
         max_seq_length=20
     )
     
     # Training config (adjust based on model type)
     if model_type in ["t5-small"]:
-         training_config = TrainingConfig(
-            batch_size=64,
-            eval_batch_size=64,
+        training_config = TrainingConfig(
+            batch_size=128,
+            eval_batch_size=128,
             num_epochs=200,
-            learning_rate=1e-4,
+            learning_rate=1e-3,
             warmup_steps=1000,
-            weight_decay=0.01,
+            weight_decay=0.001,
             gradient_clip=1.0,
             beam_size=30,
             early_stopping_patience=10,
@@ -270,7 +337,7 @@ def _create_dataset_config(
             eval_batch_size=128,
             num_epochs=300,
             learning_rate=5e-4,
-            warmup_steps=0,
+            warmup_steps=1000,
             gradient_clip=1.0,
             beam_size=30,
             early_stopping_patience=15,
@@ -299,6 +366,7 @@ def _create_dataset_config(
 def get_beauty_config(
     sequence_data_path: Optional[str] = None,
     semantic_mapping_path: Optional[str] = None,
+    collab_embedding_path: Optional[str] = None,
     output_dir: Optional[str] = None,
     checkpoint_dir: Optional[str] = None,
     model_type: str = "t5-tiny",
@@ -309,6 +377,7 @@ def get_beauty_config(
     Args:
         sequence_data_path: Path to sequence data directory
         semantic_mapping_path: Path to semantic ID mapping JSON file
+        collab_embedding_path: Path to collaborative embeddings (NPZ file)
         output_dir: Directory to save outputs
         checkpoint_dir: Directory to save checkpoints
         model_type: Type of model configuration
@@ -318,9 +387,11 @@ def get_beauty_config(
         Dictionary containing all configurations
     """
     default_paths = {
-        'sequence_data_path': "dataset/Amazon-Beauty/processed/beauty-tiger-sentenceT5base/Beauty",
-        'semantic_mapping_path': "scripts/output/tiger_tokenizer/beauty/3-256-32-ema-only-5-core-items-old-post-deduplication-500epo/semantic_id_mappings.json"
+        'sequence_data_path': "dataset/Amazon-Beauty/processed/beauty-hidvae-sentenceT5base/Beauty",
+        'semantic_mapping_path': "scripts/output/hidvae_tokenizer/beauty/3-256-anti/semantic_id_mappings.json",
+        'collab_embedding_path': "dataset/Amazon-Beauty/processed/beauty-hidvae-sentenceT5base/Beauty/lightgcn/item_embeddings_collab.npy"
     }
+    
     return _create_dataset_config(
         dataset_name="beauty",
         sequence_data_path=sequence_data_path,

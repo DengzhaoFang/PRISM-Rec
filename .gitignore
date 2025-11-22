@@ -8,6 +8,7 @@ wheels/
 
 # Virtual environments
 .venv
+.md
 
 # Output directories
 scripts/output/
@@ -19,6 +20,8 @@ dataset/
 data/sentence-t5-base/
 # logs
 logs/
+
+docs/
 
 # checkpoins
 checkpoints/

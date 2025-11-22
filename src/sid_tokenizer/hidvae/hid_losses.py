@@ -3,8 +3,8 @@ HID-VAE Loss Functions
 
 Implements specialized loss functions for Hierarchical ID VAE:
 1. Cosine Similarity Reconstruction Loss (multi-modal)
-2. Tag Anchoring Loss (semantic guidance)
-3. Codebook Balance Loss (prevent collapse)
+2. Tag Anchoring Loss (contrastive learning for semantic guidance)
+3. Codebook Balance Loss (contrastive learning to prevent collapse)
 4. Hierarchical Classification Loss (with masking)
 """
 
@@ -49,6 +49,72 @@ class CosineSimilarityLoss(nn.Module):
         loss = 1.0 - cosine_sim
         
         return loss.mean()
+
+
+class GateSupervisionLoss(nn.Module):
+    """
+    Gate supervision loss to align gate values with item popularity.
+    
+    Encourages:
+    - Long-tail items (low popularity) → low gate (don't trust noisy collab signal)
+    - Popular items (high popularity) → high gate (trust reliable collab signal)
+    """
+    
+    def __init__(
+        self, 
+        weight: float = 0.1,
+        diversity_weight: float = 0.5,
+        target_std: float = 0.2
+    ):
+        """
+        Args:
+            weight: Overall weight for gate supervision loss
+            diversity_weight: Weight for diversity regularization
+            target_std: Target standard deviation for gate values
+        """
+        super().__init__()
+        self.weight = weight
+        self.diversity_weight = diversity_weight
+        self.target_var = target_std ** 2
+        
+    def forward(
+        self, 
+        gate_values: torch.Tensor,      # (batch_size, 768)
+        popularity_scores: torch.Tensor  # (batch_size,)
+    ) -> Tuple[torch.Tensor, Dict[str, float]]:
+        """
+        Compute gate supervision loss.
+        
+        Args:
+            gate_values: Gate values from gate network (batch_size, 768)
+            popularity_scores: Ground truth popularity scores (batch_size,)
+            
+        Returns:
+            loss: Supervision loss
+            loss_dict: Dictionary with loss components
+        """
+        # Average gate value per item
+        gate_mean = gate_values.mean(dim=1)  # (batch_size,)
+        
+        # MSE loss between gate and popularity
+        supervision_loss = F.mse_loss(gate_mean, popularity_scores)
+        
+        # Diversity regularization (encourage larger variance)
+        gate_var = gate_mean.var()
+        diversity_loss = F.relu(self.target_var - gate_var)
+        
+        # Combined loss
+        total_loss = supervision_loss + self.diversity_weight * diversity_loss
+        
+        loss_dict = {
+            'gate_supervision': supervision_loss.item(),
+            'gate_diversity': diversity_loss.item(),
+            'gate_variance': gate_var.item(),
+            'gate_mean': gate_mean.mean().item(),
+            'gate_std': gate_mean.std().item()
+        }
+        
+        return self.weight * total_loss, loss_dict
 
 
 class MultiModalReconstructionLoss(nn.Module):
@@ -113,10 +179,15 @@ class MultiModalReconstructionLoss(nn.Module):
         return loss_total, loss_dict
 
 
-class TagAnchoringLoss(nn.Module):
+class SoftAnchorLoss(nn.Module):
     """
-    Tag anchoring loss that aligns codebook vectors with tag semantic space.
-    Uses projection layers to map tag embeddings to codebook dimension.
+    Soft anchoring loss that aligns codebooks with tag semantics while avoiding aggressive
+    assignments that destabilise the codebook.
+    
+    The loss combines:
+    - Soft reconstruction: align projected tag embeddings with the weighted average of codes
+    - Distribution consistency: keep assignment distributions close to EMA-stabilised targets
+    - Entropy-aware adaptive weighting: prevents over-confident assignments that collapse usage
     """
     
     def __init__(
@@ -124,26 +195,33 @@ class TagAnchoringLoss(nn.Module):
         tag_embed_dim: int = 768,
         codebook_dim: int = 32,
         n_layers: int = 3,
-        beta_weights: Optional[List[float]] = None
+        beta_weights: Optional[List[float]] = None,
+        temperature: float = 0.15,
+        ema_decay: float = 0.98,
+        distance_weight: float = 1.0,
+        distribution_weight: float = 0.5,
+        target_entropy_ratio: float = 0.35,
+        min_scale: float = 0.25,
+        max_scale: float = 1.5,
+        eps: float = 1e-6
     ):
-        """
-        Args:
-            tag_embed_dim: Dimension of tag embeddings (768)
-            codebook_dim: Dimension of codebook vectors (32)
-            n_layers: Number of RQ layers
-            beta_weights: Weights for each layer's anchor loss
-        """
         super().__init__()
         self.tag_embed_dim = tag_embed_dim
         self.codebook_dim = codebook_dim
         self.n_layers = n_layers
+        self.temperature = temperature
+        self.ema_decay = ema_decay
+        self.distance_weight = distance_weight
+        self.distribution_weight = distribution_weight
+        self.target_entropy_ratio = target_entropy_ratio
+        self.min_scale = min_scale
+        self.max_scale = max_scale
+        self.eps = eps
         
-        # Default weights if not provided
         if beta_weights is None:
             beta_weights = [1.0] * n_layers
         self.beta_weights = beta_weights
         
-        # Projection layers: map 768D tag embeddings to 32D codebook space
         self.projections = nn.ModuleList([
             nn.Sequential(
                 nn.Linear(tag_embed_dim, codebook_dim * 2),
@@ -154,98 +232,244 @@ class TagAnchoringLoss(nn.Module):
             for _ in range(n_layers)
         ])
         
-    def forward(
+        self._initialized = False
+        self._ema_assignments: List[Optional[torch.Tensor]] = []
+        self._entropy_targets: List[float] = []
+    
+    def _maybe_initialize_buffers(
         self,
-        tag_embeddings_per_layer: List[torch.Tensor],  # List of (n_tags_l, 768)
-        codebooks: List[torch.Tensor]  # List of (n_embed_l, 32)
-    ) -> Tuple[torch.Tensor, Dict[str, float]]:
-        """
-        Compute tag anchoring loss for all layers.
+        tag_embeddings_per_layer: List[torch.Tensor],
+        codebooks: List[torch.Tensor]
+    ):
+        if self._initialized:
+            return
         
-        Args:
-            tag_embeddings_per_layer: List of tag embeddings for each layer
-                [L2_tags (6, 768), L3_tags (37, 768), L4_tags (148, 768)]
-            codebooks: List of codebook tensors for each layer
-                [C1 (n_embed, 32), C2 (n_embed, 32), C3 (n_embed, 32)]
-                
-        Returns:
-            loss: Combined anchor loss
-            loss_dict: Dictionary with per-layer losses
-        """
-        total_loss = 0.0
-        loss_dict = {}
+        device = codebooks[0].device if codebooks else torch.device('cpu')
+        self._ema_assignments = []
+        self._entropy_targets = []
         
         for layer_idx in range(self.n_layers):
-            # Get tag embeddings and codebook for this layer
-            tag_emb = tag_embeddings_per_layer[layer_idx]  # (n_tags, 768)
-            codebook = codebooks[layer_idx]  # (n_embed, 32)
+            tag_emb = tag_embeddings_per_layer[layer_idx]
+            codebook = codebooks[layer_idx]
             
-            if tag_emb is None or len(tag_emb) == 0:
+            if tag_emb is None or codebook is None or len(tag_emb) == 0:
+                self._ema_assignments.append(None)
+                self._entropy_targets.append(0.0)
                 continue
-                
-            # Project tag embeddings to codebook space
-            proj_tag_emb = self.projections[layer_idx](tag_emb)  # (n_tags, 32)
             
-            # Quantize projected tags using current codebook
-            # Compute distances to all codebook vectors
-            # proj_tag_emb: (n_tags, 32), codebook: (n_embed, 32)
-            distances = torch.cdist(
-                proj_tag_emb.unsqueeze(0), 
-                codebook.unsqueeze(0), 
-                p=2
-            ).squeeze(0)  # (n_tags, n_embed)
+            n_tags = tag_emb.size(0)
+            n_embed = codebook.size(0)
             
-            # Find nearest codebook vector for each tag
-            min_encoding_indices = torch.argmin(distances, dim=1)  # (n_tags,)
-            quantized_tags = codebook[min_encoding_indices]  # (n_tags, 32)
+            buffer = torch.zeros(n_tags, n_embed, device=device)
+            buffer_name = f'_ema_assign_layer{layer_idx}'
+            self.register_buffer(buffer_name, buffer)
+            self._ema_assignments.append(getattr(self, buffer_name))
             
-            # Anchor loss: MSE between projected tags and quantized tags
-            layer_loss = F.mse_loss(proj_tag_emb, quantized_tags)
-            
-            # Weighted sum
-            total_loss += self.beta_weights[layer_idx] * layer_loss
-            loss_dict[f'anchor_layer{layer_idx+1}'] = layer_loss.item()
+            target_entropy = torch.log(torch.tensor(float(n_embed), device=device)).item()
+            self._entropy_targets.append(target_entropy * self.target_entropy_ratio)
         
-        loss_dict['anchor_total'] = total_loss.item()
-        return total_loss, loss_dict
+        self._initialized = True
+    
+    def forward(
+        self,
+        tag_embeddings_per_layer: List[torch.Tensor],
+        codebooks: List[torch.Tensor]
+    ) -> Tuple[torch.Tensor, Dict[str, float]]:
+        self._maybe_initialize_buffers(tag_embeddings_per_layer, codebooks)
+        
+        total_loss = torch.tensor(0.0, device=codebooks[0].device if codebooks else 'cpu')
+        log_dict: Dict[str, float] = {}
+        
+        for layer_idx in range(self.n_layers):
+            tag_emb = tag_embeddings_per_layer[layer_idx]
+            codebook = codebooks[layer_idx]
+            
+            if tag_emb is None or codebook is None or len(tag_emb) == 0:
+                continue
+            
+            proj_tag_emb = self.projections[layer_idx](tag_emb)
+            distances = torch.cdist(proj_tag_emb, codebook, p=2)
+            logits = -distances / self.temperature
+            assign_probs = torch.softmax(logits, dim=-1)
+            
+            # EMA-stabilised targets
+            ema_buffer = self._ema_assignments[layer_idx]
+            if ema_buffer is not None:
+                with torch.no_grad():
+                    if torch.count_nonzero(ema_buffer).item() == 0:
+                        ema_buffer.copy_(assign_probs.detach())
+                    else:
+                        ema_buffer.mul_(self.ema_decay).add_(
+                            assign_probs.detach(), alpha=1.0 - self.ema_decay
+                        )
+                target_probs = ema_buffer / (ema_buffer.sum(dim=-1, keepdim=True) + self.eps)
+            else:
+                target_probs = assign_probs.detach()
+            
+            target_probs = torch.clamp(target_probs, min=self.eps)
+            
+            soft_positive = torch.matmul(assign_probs, codebook)
+            distance_loss = F.smooth_l1_loss(soft_positive, proj_tag_emb)
+            kl_loss = F.kl_div(
+                torch.log(assign_probs + self.eps),
+                target_probs,
+                reduction='batchmean'
+            )
+            
+            entropy = -(assign_probs * torch.log(assign_probs + self.eps)).sum(dim=-1).mean()
+            target_entropy = torch.tensor(
+                self._entropy_targets[layer_idx],
+                device=entropy.device
+            )
+            entropy_scale = torch.clamp(
+                target_entropy / (entropy + self.eps),
+                min=self.min_scale,
+                max=self.max_scale
+            ).detach()
+            
+            layer_loss = (
+                self.distance_weight * distance_loss +
+                self.distribution_weight * kl_loss
+            )
+            weighted_layer_loss = self.beta_weights[layer_idx] * entropy_scale * layer_loss
+            
+            total_loss = total_loss + weighted_layer_loss
+            
+            log_dict[f'anchor_layer{layer_idx+1}_distance'] = distance_loss.item()
+            log_dict[f'anchor_layer{layer_idx+1}_kl'] = kl_loss.item()
+            log_dict[f'anchor_layer{layer_idx+1}_entropy'] = entropy.item()
+            log_dict[f'anchor_layer{layer_idx+1}_scale'] = entropy_scale.item()
+        
+        log_dict['anchor_total'] = total_loss.item()
+        return total_loss, log_dict
 
 
 class CodebookBalanceLoss(nn.Module):
     """
-    Codebook balance loss using KL divergence to encourage uniform usage.
-    Prevents codebook collapse by penalizing non-uniform usage distributions.
+    Codebook balance loss using contrastive learning to encourage diversity.
+    Prevents codebook collapse by pushing different codebook vectors apart in embedding space.
+    Uses contrastive learning: pull together instances of the same code, push apart different codes.
     """
     
     def __init__(
         self,
         n_layers: int = 3,
         gamma_weights: Optional[List[float]] = None,
+        temperature: float = 0.07,
         eps: float = 1e-10
     ):
         """
         Args:
             n_layers: Number of RQ layers
             gamma_weights: Weights for each layer's balance loss
+            temperature: Temperature parameter for contrastive loss
             eps: Small constant for numerical stability
         """
         super().__init__()
         self.n_layers = n_layers
+        self.temperature = temperature
         self.eps = eps
         
         if gamma_weights is None:
             gamma_weights = [1.0] * n_layers
         self.gamma_weights = gamma_weights
         
+    def contrastive_balance_loss(
+        self, 
+        codebook: torch.Tensor, 
+        encoding_indices: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Compute contrastive loss to encourage codebook diversity.
+        
+        Args:
+            codebook: Codebook vectors (n_embed, dim)
+            encoding_indices: Selected codebook indices (batch_size,)
+            
+        Returns:
+            loss: Contrastive balance loss
+        """
+        n_embed = codebook.size(0)
+        batch_size = encoding_indices.size(0)
+        
+        # Normalize codebook vectors
+        codebook_norm = F.normalize(codebook, p=2, dim=-1)  # (n_embed, dim)
+        
+        # Get used codebook vectors
+        used_indices = torch.unique(encoding_indices)
+        n_used = used_indices.size(0)
+        
+        if n_used < 2:
+            # Need at least 2 different codes for contrastive learning
+            return torch.tensor(0.0, device=codebook.device)
+        
+        # Get embeddings of used codes
+        used_codes = codebook_norm[used_indices]  # (n_used, dim)
+        
+        # Compute pairwise similarities between all used codes
+        # Similarity matrix: (n_used, n_used)
+        similarity_matrix = torch.matmul(used_codes, used_codes.t())  # (n_used, n_used)
+        
+        # Create labels: diagonal is positive (same code), off-diagonal is negative (different codes)
+        # For contrastive learning, we want to minimize similarity between different codes
+        # and maximize similarity of codes with themselves (which is always 1.0 after normalization)
+        
+        # Create mask for positive pairs (diagonal) and negative pairs (off-diagonal)
+        identity_mask = torch.eye(n_used, device=codebook.device, dtype=torch.bool)
+        
+        # Positive pairs: same code with itself (diagonal, should be 1.0)
+        # Negative pairs: different codes (off-diagonal, should be low)
+        
+        # For contrastive learning, we want:
+        # - Positive pairs (same code): high similarity (already 1.0 after normalization)
+        # - Negative pairs (different codes): low similarity
+        
+        # Extract negative similarities (off-diagonal)
+        negative_mask = ~identity_mask
+        negative_similarities = similarity_matrix[negative_mask]  # (n_used * (n_used - 1),)
+        
+        # Loss: maximize distance between different codes
+        # We want negative similarities to be as low as possible
+        # Use a hinge-like loss: max(0, similarity - margin)
+        # Or use InfoNCE-style: -log(exp(-sim_neg / temp) / sum(exp(-sim_all / temp)))
+        
+        # Simple approach: penalize high similarities between different codes
+        # Loss = mean of negative similarities (we want this to be low)
+        # But we want to push them apart, so we maximize the negative of similarities
+        # Or use: loss = mean(negative_similarities) - we want this to be minimized
+        
+        # Alternative: use a margin-based loss
+        margin = 0.5  # Target margin between different codes
+        negative_loss = F.relu(negative_similarities - margin).mean()
+        
+        # Also encourage uniform usage by penalizing over-used codes
+        # Count usage frequency
+        bincount = torch.bincount(encoding_indices, minlength=n_embed).float()
+        usage_freq = bincount[used_indices] / (bincount.sum() + self.eps)  # (n_used,)
+        
+        # Uniform target: 1 / n_used for each used code
+        uniform_target = torch.ones_like(usage_freq) / n_used
+        
+        # Usage diversity loss: encourage uniform distribution
+        usage_loss = F.mse_loss(usage_freq, uniform_target)
+        
+        # Combine contrastive loss and usage diversity loss
+        total_loss = negative_loss + 0.1 * usage_loss
+        
+        return total_loss
+        
     def forward(
         self,
         encoding_indices_per_layer: List[torch.Tensor],  # List of (batch_size,)
+        codebooks: List[torch.Tensor],  # List of (n_embed, dim) - need codebooks for contrastive learning
         n_embed_per_layer: List[int]  # List of codebook sizes
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
         """
-        Compute codebook balance loss for all layers.
+        Compute codebook balance loss for all layers using contrastive learning.
         
         Args:
             encoding_indices_per_layer: List of selected codebook indices per layer
+            codebooks: List of codebook tensors for each layer (needed for contrastive learning)
             n_embed_per_layer: List of codebook sizes for each layer
             
         Returns:
@@ -257,32 +481,21 @@ class CodebookBalanceLoss(nn.Module):
         
         for layer_idx in range(self.n_layers):
             indices = encoding_indices_per_layer[layer_idx]  # (batch_size,)
+            codebook = codebooks[layer_idx]  # (n_embed, dim)
             n_embed = n_embed_per_layer[layer_idx]
             
-            # Compute observed usage distribution
-            bincount = torch.bincount(indices, minlength=n_embed).float()
-            p_obs = bincount / (bincount.sum() + self.eps)  # Normalize to probability
-            
-            # Uniform target distribution
-            p_uniform = torch.ones_like(p_obs) / n_embed
-            
-            # KL divergence: KL(p_obs || p_uniform)
-            # KL = sum(p_obs * log(p_obs / p_uniform))
-            kl_div = F.kl_div(
-                torch.log(p_obs + self.eps),
-                p_uniform,
-                reduction='sum',
-                log_target=False
-            )
-            
-            # Weighted sum
-            total_loss += self.gamma_weights[layer_idx] * kl_div
+            # Compute contrastive balance loss
+            layer_loss = self.contrastive_balance_loss(codebook, indices)
             
             # Track usage statistics
+            bincount = torch.bincount(indices, minlength=n_embed).float()
             used_codes = (bincount > 0).sum().item()
             usage_ratio = used_codes / n_embed
             
-            loss_dict[f'balance_layer{layer_idx+1}'] = kl_div.item()
+            # Weighted sum
+            total_loss += self.gamma_weights[layer_idx] * layer_loss
+            
+            loss_dict[f'balance_layer{layer_idx+1}'] = layer_loss.item()
             loss_dict[f'usage_layer{layer_idx+1}'] = usage_ratio
         
         loss_dict['balance_total'] = total_loss.item()
@@ -384,6 +597,10 @@ class HIDVAETotalLoss(nn.Module):
     """
     Combined loss function for HID-VAE training.
     Integrates reconstruction, anchoring, balance, classification, and commitment losses.
+    
+    Note:
+        - Tag Anchoring Loss: Uses contrastive learning (InfoNCE) to align codebook vectors with tag semantics
+        - Codebook Balance Loss: Uses contrastive learning to encourage diversity among codebook vectors
     """
     
     def __init__(
@@ -401,6 +618,11 @@ class HIDVAETotalLoss(nn.Module):
         delta_weight: float = 1.0,
         # Commitment loss param
         commitment_weight: float = 0.25,
+        # Gate supervision params
+        use_gate_supervision: bool = False,
+        gate_supervision_weight: float = 0.1,
+        gate_diversity_weight: float = 0.5,
+        gate_target_std: float = 0.2,
         # General params
         n_layers: int = 3,
         ignore_index: int = 0
@@ -416,7 +638,7 @@ class HIDVAETotalLoss(nn.Module):
             lambda_collab=lambda_collab
         )
         
-        self.anchor_loss = TagAnchoringLoss(
+        self.anchor_loss = SoftAnchorLoss(
             tag_embed_dim=tag_embed_dim,
             codebook_dim=codebook_dim,
             n_layers=n_layers,
@@ -436,6 +658,17 @@ class HIDVAETotalLoss(nn.Module):
         
         self.commitment_weight = commitment_weight
         
+        # Gate supervision loss
+        self.use_gate_supervision = use_gate_supervision
+        if use_gate_supervision:
+            self.gate_supervision_loss = GateSupervisionLoss(
+                weight=gate_supervision_weight,
+                diversity_weight=gate_diversity_weight,
+                target_std=gate_target_std
+            )
+        else:
+            self.gate_supervision_loss = None
+        
     def forward(
         self,
         # Reconstruction inputs
@@ -454,11 +687,30 @@ class HIDVAETotalLoss(nn.Module):
         targets_per_layer: List[torch.Tensor],
         masks_per_layer: Optional[List[torch.Tensor]] = None,
         # Commitment loss
-        commitment_loss: Optional[torch.Tensor] = None
+        commitment_loss: Optional[torch.Tensor] = None,
+        # Gate supervision inputs
+        gate_values: Optional[torch.Tensor] = None,
+        popularity_scores: Optional[torch.Tensor] = None,
+        # Optional curriculum weights
+        loss_weights: Optional[Dict[str, float]] = None
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
         """
         Compute total HID-VAE loss.
         
+        Args:
+            pred_content: Predicted content embeddings
+            target_content: Target content embeddings
+            pred_collab: Predicted collaborative embeddings
+            target_collab: Target collaborative embeddings
+            tag_embeddings_per_layer: List of tag embeddings for each layer
+            codebooks: List of codebook tensors for each layer (used by both anchor and balance losses)
+            encoding_indices_per_layer: List of selected codebook indices per layer
+            n_embed_per_layer: List of codebook sizes for each layer
+            predictions_per_layer: List of classification predictions per layer
+            targets_per_layer: List of classification targets per layer
+            masks_per_layer: Optional masks for classification
+            commitment_loss: Optional commitment loss from VQ
+            
         Returns:
             total_loss: Combined loss scalar
             loss_dict: Dictionary with all loss components
@@ -473,23 +725,46 @@ class HIDVAETotalLoss(nn.Module):
         )
         
         loss_balance, dict_balance = self.balance_loss(
-            encoding_indices_per_layer, n_embed_per_layer
+            encoding_indices_per_layer, codebooks, n_embed_per_layer
         )
         
         loss_class, dict_class = self.class_loss(
             predictions_per_layer, targets_per_layer, masks_per_layer
         )
         
+        # Curriculum / adaptive weights
+        weights = loss_weights or {}
+        recon_scale = weights.get('recon', 1.0)
+        anchor_scale = weights.get('anchor', 1.0)
+        balance_scale = weights.get('balance', 1.0)
+        class_scale = weights.get('class', 1.0)
+        commit_scale = weights.get('commitment', 1.0)
+        
+        scaled_recon = recon_scale * loss_recon
+        scaled_anchor = anchor_scale * loss_anchor
+        scaled_balance = balance_scale * loss_balance
+        scaled_class = class_scale * loss_class
+        
         # Combine all losses
-        total_loss = loss_recon + loss_anchor + loss_balance + loss_class
+        total_loss = scaled_recon + scaled_anchor + scaled_balance + scaled_class
         
         # Add commitment loss if provided
         if commitment_loss is not None:
-            weighted_commit = self.commitment_weight * commitment_loss
+            weighted_commit = commit_scale * self.commitment_weight * commitment_loss
             total_loss += weighted_commit
             dict_commit = {'commitment': commitment_loss.item()}
         else:
             dict_commit = {}
+        
+        # Add gate supervision loss if enabled
+        if self.gate_supervision_loss is not None and gate_values is not None and popularity_scores is not None:
+            loss_gate_sup, dict_gate_sup = self.gate_supervision_loss(
+                gate_values, popularity_scores
+            )
+            gate_scale = weights.get('gate_supervision', 1.0)
+            total_loss += gate_scale * loss_gate_sup
+        else:
+            dict_gate_sup = {}
         
         # Merge all dictionaries
         loss_dict = {
@@ -498,7 +773,13 @@ class HIDVAETotalLoss(nn.Module):
             **dict_balance,
             **dict_class,
             **dict_commit,
-            'total_loss': total_loss.item()
+            **dict_gate_sup,
+            'total_loss': total_loss.item(),
+            'scale_recon': recon_scale,
+            'scale_anchor': anchor_scale,
+            'scale_balance': balance_scale,
+            'scale_class': class_scale,
+            'scale_commitment': commit_scale
         }
         
         return total_loss, loss_dict

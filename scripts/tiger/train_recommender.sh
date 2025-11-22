@@ -16,13 +16,13 @@ echo ""
 # Configuration
 # ============================================================
 CONFIG="beauty"
-DEVICE="cuda:2"
+DEVICE="cuda:1"
 NUM_WORKERS=4
-MODEL_TYPE="t5-tiny"
+MODEL_TYPE="t5-small"
 
 # Output directory keywords (optional, for custom naming)
 # Example: "baseline-experiment" will create dir like "2025-11-06-17-26-56_baseline-experiment"
-OUTPUT_KEYWORDS="3layer-hidvae-tokenizer-v2"
+OUTPUT_KEYWORDS="3layer-tiger-beamsize-small"
 
 # ============================================================
 # Learning Rate Scheduler

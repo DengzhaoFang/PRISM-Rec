@@ -60,6 +60,22 @@ class HIDVAEDataset(Dataset):
         self.item_ids = item_df['ItemID'].values
         self.num_items = len(item_df)
         
+        # Store item_df for accessing popularity scores
+        self.item_df = item_df
+        
+        # Check if popularity_score exists
+        if 'popularity_score' in item_df.columns:
+            self.has_popularity = True
+            self.popularity_scores = torch.tensor(
+                item_df['popularity_score'].values, 
+                dtype=torch.float32
+            )
+            print(f"  ✓ Popularity scores loaded (mean: {self.popularity_scores.mean():.3f})")
+        else:
+            self.has_popularity = False
+            self.popularity_scores = torch.zeros(self.num_items, dtype=torch.float32)
+            print(f"  ⚠ No popularity_score found, using zeros")
+        
         # Extract content embeddings (attribute_embedding: 768D)
         self.content_embeddings = torch.stack([
             torch.tensor(emb, dtype=torch.float32)
@@ -287,13 +303,17 @@ class HIDVAEDataset(Dataset):
         padded_tag_ids = mapped_tag_ids + [0] * (max_layers - len(mapped_tag_ids))
         tag_mask = [1] * num_tags + [0] * (max_layers - num_tags)
         
+        # Get popularity score
+        popularity_score = self.popularity_scores[idx]
+        
         return {
             'item_id': self.item_ids[idx],
             'content_emb': content_emb,
             'collab_emb': collab_emb,
             'tag_ids': torch.tensor(padded_tag_ids, dtype=torch.long),
             'tag_mask': torch.tensor(tag_mask, dtype=torch.float32),
-            'num_tags': num_tags
+            'num_tags': num_tags,
+            'popularity_score': popularity_score
         }
 
 
