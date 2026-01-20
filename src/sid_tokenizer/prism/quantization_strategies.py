@@ -117,7 +117,7 @@ class RotationTrickQuantization(QuantizationStrategy):
             z_q: Quantized embeddings (batch_size, embed_dim)
             
         Returns:
-            Transformed embeddings with gradient flow
+            Transformed embeddings with gradient flow (batch_size, embed_dim)
         """
         # Detach the quantized embeddings for the transformation
         z_q_detached = z_q.detach()
@@ -128,31 +128,30 @@ class RotationTrickQuantization(QuantizationStrategy):
         z_norms = torch.linalg.vector_norm(z_detached, dim=-1, keepdim=True)  # (batch, 1)
         
         # Compute scaling factor
-        lambda_ = z_q_norms / (z_norms + 1e-8)  # Avoid division by zero
+        lambda_ = z_q_norms / (z_norms + 1e-8)  # (batch, 1)
         
         # Normalize vectors
-        z_normalized = z_detached / (z_norms + 1e-8)
-        z_q_normalized = z_q_detached / (z_q_norms + 1e-8)
+        z_normalized = z_detached / (z_norms + 1e-8)  # (batch, embed_dim)
+        z_q_normalized = z_q_detached / (z_q_norms + 1e-8)  # (batch, embed_dim)
         
-        # Compute normalized sum
-        normalized_sum = F.normalize(z_normalized + z_q_normalized, p=2, dim=-1)
+        # Compute normalized sum and normalize it
+        normalized_sum = F.normalize(z_normalized + z_q_normalized, p=2, dim=-1)  # (batch, embed_dim)
         
-        # Expand dimensions for matrix multiplication
-        z_expanded = z.unsqueeze(1)  # (batch, 1, embed_dim)
+        # Compute projections using einsum to avoid broadcasting issues
+        # sum_projection: project z onto normalized_sum direction, then scale by normalized_sum
+        # This is: (z · normalized_sum) * normalized_sum
+        z_dot_sum = torch.sum(z * normalized_sum, dim=-1, keepdim=True)  # (batch, 1)
+        sum_projection = z_dot_sum * normalized_sum  # (batch, embed_dim)
         
-        # Compute rotation using equation from paper
-        sum_projection = (
-            z_expanded @ normalized_sum.unsqueeze(-1) @ normalized_sum.unsqueeze(1)
-        )  # (batch, 1, embed_dim)
+        # rescaled: project z onto z_normalized direction, then scale by z_q_normalized
+        # This is: (z · z_normalized) * z_q_normalized
+        z_dot_z_norm = torch.sum(z * z_normalized, dim=-1, keepdim=True)  # (batch, 1)
+        rescaled = z_dot_z_norm * z_q_normalized  # (batch, embed_dim)
         
-        rescaled = (
-            z_expanded @ z_normalized.unsqueeze(-1) @ z_q_normalized.unsqueeze(1)
-        )  # (batch, 1, embed_dim)
+        # Apply transformation: lambda * (z - 2*sum_projection + 2*rescaled)
+        z_q_rotated = lambda_ * (z - 2 * sum_projection + 2 * rescaled)  # (batch, embed_dim)
         
-        # Apply transformation
-        z_q_rotated = lambda_ * (z_expanded - 2 * sum_projection + 2 * rescaled)
-        
-        return z_q_rotated.squeeze(1)
+        return z_q_rotated
     
     def quantize(
         self,
@@ -238,3 +237,4 @@ def create_quantization_strategy(strategy_name: str) -> QuantizationStrategy:
         )
     
     return strategies[strategy_name]()
+

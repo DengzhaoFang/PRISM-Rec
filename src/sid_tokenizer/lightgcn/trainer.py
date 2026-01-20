@@ -338,7 +338,7 @@ class LightGCNTrainer:
     
     def extract_item_embeddings(self) -> np.ndarray:
         """
-        Extract final item embeddings for use in HiD-VAE.
+        Extract final item embeddings for use in Prism.
         
         Returns:
             item_embeddings: numpy array [n_items, embedding_dim]

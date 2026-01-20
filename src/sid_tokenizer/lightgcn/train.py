@@ -1,5 +1,5 @@
 """
-Training script for LightGCN - Stage 0 of HiD-VAE
+Training script for LightGCN - Stage 0 of Prism
 """
 
 import argparse

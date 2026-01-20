@@ -121,4 +121,3 @@ class CosineDistance:
         # Convert to distance
         distance = 1.0 - similarity
         return distance
-

@@ -1,5 +1,5 @@
 """
-LightGCN implementation for HiD-VAE Stage 0: Cold-start initialization
+LightGCN implementation for Prism Stage 0: Cold-start initialization
 """
 
 from dataset import BeautyDataset, BPRSampler
