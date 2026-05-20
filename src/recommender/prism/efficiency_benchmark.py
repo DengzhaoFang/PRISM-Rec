@@ -89,12 +89,6 @@ def count_auxiliary_task_parameters(model: nn.Module, model_name: str) -> int:
             auxiliary_params += codebook_params
             logger.info(f"  Codebook predictor params (training only): {codebook_params:,}")
         
-        # Count tag_predictor parameters
-        if hasattr(model, 'tag_predictor') and model.tag_predictor is not None:
-            tag_params = sum(p.numel() for p in model.tag_predictor.parameters())
-            auxiliary_params += tag_params
-            logger.info(f"  Tag predictor params (training only): {tag_params:,}")
-    
     return auxiliary_params
 
 

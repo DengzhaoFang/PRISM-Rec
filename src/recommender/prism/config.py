@@ -28,11 +28,6 @@ class ModelConfig:
     codebook_size: int = 256  # Default size of each codebook (used if codebook_sizes is None)
     codebook_sizes: Optional[List[int]] = None  # Variable codebook sizes per layer (e.g., [128, 256, 512])
     
-    # Tag token parameters (for predict_tags_first feature)
-    tag_token_offset: int = 0  # Offset where tag tokens start in vocab
-    num_tag_tokens: int = 0  # Number of tag tokens
-    max_tag_ids_per_layer: Optional[List[int]] = None  # Max tag ID for each layer
-    
     # Vocabulary size (will be set dynamically based on actual data)
     _vocab_size: Optional[int] = None
     
@@ -219,12 +214,6 @@ class TrainingConfig:
     use_codebook_prediction: bool = False
     codebook_prediction_weight: float = 0.0005  # Loss weight
     
-    # Feature 2: Tag ID Prediction Loss (SSA - Semantic Structure Alignment)
-    # Predicts tag IDs at each decoding step to bind semantic info to ID prediction
-    use_tag_prediction: bool = False
-    tag_prediction_weight: float = 0.0005  # Loss weight
-    predict_tags_first: bool = False  # Whether to predict tags before semantic IDs
-    
     # Feature 3: Multi-source Embedding Fusion
     use_multimodal_fusion: bool = False
     fusion_gate_type: str = "learned"  # Options: "learned", "fixed", "attention", "moe"
@@ -403,9 +392,9 @@ def get_beauty_config(
         Dictionary containing all configurations
     """
     default_paths = {
-        'sequence_data_path': "dataset/Amazon-Beauty/processed/beauty-prism-sentenceT5base/Beauty",
-        'semantic_mapping_path': "scripts/output/prism_tokenizer/beauty/3-256-32-ema-only-5-core-items/semantic_id_mappings.json",
-        'collab_embedding_path': "dataset/Amazon-Beauty/processed/beauty-prism-sentenceT5base/Beauty/lightgcn/item_embeddings_collab.npy"
+        'sequence_data_path': "dataset/Amazon-Beauty/processed/beauty-tiger-sentenceT5base/Beauty",
+        'semantic_mapping_path': "scripts/output/prism_tokenizer/beauty/3-256-32-wo-hsa-4/semantic_id_mappings.json",
+        'collab_embedding_path': "dataset/Amazon-Beauty/processed/beauty-tiger-sentenceT5base/Beauty/lightgcn/item_embeddings_collab.npy"
     }
     
     return _create_dataset_config(
@@ -430,9 +419,9 @@ def get_sports_config(
 ) -> dict:
     """Get configuration for Sports dataset."""
     default_paths = {
-        'sequence_data_path': "dataset/Amazon-Sports/processed/sports-prism-sentenceT5base/Sports",
+        'sequence_data_path': "dataset/Amazon-Sports/processed/sports-tiger-sentenceT5base/Sports",
         'semantic_mapping_path': "scripts/output/prism_tokenizer/sports/3-256-32-ema-only-5-core-items/semantic_id_mappings.json",
-        'collab_embedding_path': "dataset/Amazon-Sports/processed/sports-prism-sentenceT5base/Sports/lightgcn/item_embeddings_collab.npy"
+        'collab_embedding_path': "dataset/Amazon-Sports/processed/sports-tiger-sentenceT5base/Sports/lightgcn/item_embeddings_collab.npy"
 
     }
     
@@ -458,9 +447,9 @@ def get_toys_config(
 ) -> dict:
     """Get configuration for Toys dataset."""
     default_paths = {
-        'sequence_data_path': "dataset/Amazon-Toys/processed/toys-prism-sentenceT5base/Toys",
+        'sequence_data_path': "dataset/Amazon-Toys/processed/toys-tiger-sentenceT5base/Toys",
         'semantic_mapping_path': "scripts/output/prism_tokenizer/toys/3-256-32-ema-only-5-core-items/semantic_id_mappings.json",
-        'collab_embedding_path': "dataset/Amazon-Toys/processed/toys-prism-sentenceT5base/Toys/lightgcn/item_embeddings_collab.npy"
+        'collab_embedding_path': "dataset/Amazon-Toys/processed/toys-tiger-sentenceT5base/Toys/lightgcn/item_embeddings_collab.npy"
 
     }
     
@@ -486,9 +475,9 @@ def get_cds_config(
 ) -> dict:
     """Get configuration for CDs dataset."""
     default_paths = {
-        'sequence_data_path': "dataset/Amazon-CDs/processed/cds-prism-sentenceT5base/CDs",
+        'sequence_data_path': "dataset/Amazon-CDs/processed/cds-tiger-sentenceT5base/CDs",
         'semantic_mapping_path': "scripts/output/prism_tokenizer/cds/3-256-32-ema-only-5-core-items/semantic_id_mappings.json",
-        'collab_embedding_path': "dataset/Amazon-CDs/processed/cds-prism-sentenceT5base/CDs/lightgcn/item_embeddings_collab.npy"
+        'collab_embedding_path': "dataset/Amazon-CDs/processed/cds-tiger-sentenceT5base/CDs/lightgcn/item_embeddings_collab.npy"
 
     }
     

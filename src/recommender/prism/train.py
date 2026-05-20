@@ -193,24 +193,6 @@ Examples:
         help='Loss weight for codebook prediction (default: 0.1)'
     )
     
-    # Feature 2: Tag ID Prediction
-    parser.add_argument(
-        '--use_tag_prediction',
-        action='store_true',
-        help='Add auxiliary task to predict hierarchical tag IDs'
-    )
-    parser.add_argument(
-        '--tag_prediction_weight',
-        type=float,
-        default=0.1,
-        help='Loss weight for tag prediction (default: 0.1)'
-    )
-    parser.add_argument(
-        '--predict_tags_first',
-        action='store_true',
-        help='Predict tags before semantic IDs in output sequence'
-    )
-    
     # Feature 3: Multi-source Embedding Fusion
     # Feature 3: Multi-source Embedding Fusion
     parser.add_argument(
@@ -538,11 +520,6 @@ def _build_config_kwargs(args) -> dict:
     if args.use_codebook_prediction:
         config_kwargs['use_codebook_prediction'] = True
         config_kwargs['codebook_prediction_weight'] = args.codebook_prediction_weight
-    
-    if args.use_tag_prediction:
-        config_kwargs['use_tag_prediction'] = True
-        config_kwargs['tag_prediction_weight'] = args.tag_prediction_weight
-        config_kwargs['predict_tags_first'] = args.predict_tags_first
     
     if args.use_multimodal_fusion:
         config_kwargs['use_multimodal_fusion'] = True

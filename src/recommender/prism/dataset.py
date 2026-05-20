@@ -17,39 +17,26 @@ import os
 logger = logging.getLogger(__name__)
 
 
-def load_codebook_mappings(mapping_path: str) -> Tuple[Dict[int, np.ndarray], Dict[int, List[int]]]:
-    """Load codebook vectors and tag IDs from item_codebook_mappings.npz.
-    """
-    # Handle both file path and directory path
+def load_codebook_mappings(mapping_path: str) -> Dict[int, np.ndarray]:
+    """Load codebook vectors from item_codebook_mappings.npz."""
     if os.path.isdir(mapping_path):
         npz_path = os.path.join(mapping_path, 'item_codebook_mappings.npz')
     else:
         npz_path = mapping_path
-    
+
     if not os.path.exists(npz_path):
-        logger.warning(f"Codebook mappings not found at {npz_path}, returning empty dicts")
-        return {}, {}
-    
+        logger.warning(f"Codebook mappings not found at {npz_path}, returning empty dict")
+        return {}
+
     logger.info(f"Loading codebook mappings from {npz_path}")
     data = np.load(npz_path, allow_pickle=True)
-    
+
     item_ids = data['item_ids']
-    codebook_vectors = data['codebook_vectors']  # Shape: (n_items, n_layers, latent_dim)
-    predicted_tags = data.get('predicted_tags', np.array([]))  # Shape: (n_items, n_layers)
-    
-    # Create dictionaries
+    codebook_vectors = data['codebook_vectors']
+
     codebook_dict = {int(iid): codebook_vectors[i] for i, iid in enumerate(item_ids)}
-    
-    if predicted_tags.size > 0:
-        tag_dict = {int(iid): predicted_tags[i].tolist() for i, iid in enumerate(item_ids)}
-    else:
-        tag_dict = {}
-    
     logger.info(f"Loaded codebook vectors for {len(codebook_dict)} items")
-    if tag_dict:
-        logger.info(f"Loaded tag IDs for {len(tag_dict)} items")
-    
-    return codebook_dict, tag_dict
+    return codebook_dict
 
 
 def load_content_embeddings(data_dir: str) -> Dict[int, np.ndarray]:
@@ -428,7 +415,6 @@ class GenRecDataset(Dataset):
         codebook_vectors: Optional[Dict[int, np.ndarray]] = None,
         content_embeddings: Optional[Dict[int, np.ndarray]] = None,
         collab_embeddings: Optional[Dict[int, np.ndarray]] = None,
-        tag_ids: Optional[Dict[int, List[int]]] = None,
         use_multimodal: bool = False
     ):
         """Initialize the dataset.
@@ -443,7 +429,6 @@ class GenRecDataset(Dataset):
         self.codebook_vectors = codebook_vectors or {}
         self.content_embeddings = content_embeddings or {}
         self.collab_embeddings = collab_embeddings or {}
-        self.tag_ids = tag_ids or {}
         self.use_multimodal = use_multimodal
         
         # Determine dimensions from data
@@ -481,7 +466,6 @@ class GenRecDataset(Dataset):
             logger.info(f"    Codebook vectors: {len(self.codebook_vectors)} items")
             logger.info(f"    Content embeddings: {len(self.content_embeddings)} items")
             logger.info(f"    Collab embeddings: {len(self.collab_embeddings)} items")
-            logger.info(f"    Tag IDs: {len(self.tag_ids)} items")
     
     def _convert_to_codes(self):
         """Convert item IDs to semantic codes."""
@@ -594,51 +578,23 @@ class GenRecDataset(Dataset):
             else:
                 target_collab_emb = np.zeros(self.collab_dim, dtype=np.float32)
             
-            # Get tag IDs
-            history_tag_ids = []
-            for iid in history_item_ids_padded:
-                if iid in self.tag_ids:
-                    history_tag_ids.append(self.tag_ids[iid])
-                else:
-                    history_tag_ids.append([0] * self.n_layers)  # Padding tags
-            
-            if target_item_id in self.tag_ids:
-                target_tag_ids = self.tag_ids[target_item_id]
-            else:
-                target_tag_ids = [0] * self.n_layers
-            
-            # Add multimodal data to result
             result.update({
-                'history_codebook_vecs': np.array(history_codebook_vecs, dtype=np.float32),  # (max_len, n_layers, latent_dim)
-                'target_codebook_vecs': target_codebook_vecs.astype(np.float32),  # (n_layers, latent_dim)
-                'history_content_embs': np.array(history_content_embs, dtype=np.float32),  # (max_len, content_dim)
-                'target_content_emb': target_content_emb.astype(np.float32),  # (content_dim,)
-                'history_collab_embs': np.array(history_collab_embs, dtype=np.float32),  # (max_len, collab_dim)
-                'target_collab_emb': target_collab_emb.astype(np.float32),  # (collab_dim,)
-                'history_tag_ids': history_tag_ids,  # List of lists
-                'target_tag_ids': target_tag_ids  # List
+                'history_codebook_vecs': np.array(history_codebook_vecs, dtype=np.float32),
+                'target_codebook_vecs': target_codebook_vecs.astype(np.float32),
+                'history_content_embs': np.array(history_content_embs, dtype=np.float32),
+                'target_content_emb': target_content_emb.astype(np.float32),
+                'history_collab_embs': np.array(history_collab_embs, dtype=np.float32),
+                'target_collab_emb': target_collab_emb.astype(np.float32),
             })
         else:
-            # Even if multimodal fusion is disabled, we still need to load
-            # codebook vectors and tag IDs for auxiliary prediction tasks
-            # CRITICAL FIX: Load target data for auxiliary tasks even without fusion
-            
-            # Get target codebook vectors (for codebook prediction task)
+            # Load target codebook vectors for auxiliary prediction tasks
             if target_item_id in self.codebook_vectors:
                 target_codebook_vecs = self.codebook_vectors[target_item_id]
             else:
                 target_codebook_vecs = np.zeros((self.n_layers, self.latent_dim), dtype=np.float32)
-            
-            # Get target tag IDs (for tag prediction task)
-            if target_item_id in self.tag_ids:
-                target_tag_ids = self.tag_ids[target_item_id]
-            else:
-                target_tag_ids = [0] * self.n_layers
-            
-            # Add auxiliary task data to result
+
             result.update({
-                'target_codebook_vecs': target_codebook_vecs.astype(np.float32),  # (n_layers, latent_dim)
-                'target_tag_ids': target_tag_ids  # List
+                'target_codebook_vecs': target_codebook_vecs.astype(np.float32),
             })
         
         return result
@@ -687,14 +643,10 @@ def create_datasets(
     codebook_vectors_dict = {}
     content_embeddings_dict = {}
     collab_embeddings_dict = {}
-    tag_ids_dict = {}
-    
-    # Load auxiliary task data (codebook vectors and tags)
-    # These should be loaded regardless of use_multimodal setting
-    # because they're needed for auxiliary prediction tasks
+
     semantic_mapping_dir = os.path.dirname(semantic_mapping_path)
-    codebook_vectors_dict, tag_ids_dict = load_codebook_mappings(semantic_mapping_dir)
-    logger.info(f"Loaded auxiliary task data: {len(codebook_vectors_dict)} codebook vectors, {len(tag_ids_dict)} tag mappings")
+    codebook_vectors_dict = load_codebook_mappings(semantic_mapping_dir)
+    logger.info(f"Loaded auxiliary task data: {len(codebook_vectors_dict)} codebook vectors")
     
     if use_multimodal:
         logger.info("Loading multi-source information for fusion...")
@@ -714,41 +666,10 @@ def create_datasets(
         logger.warning(f"⚠ This is expected for Prism variable-length IDs")
         num_layers = semantic_mapper.num_layers
     
-    # Update model config with actual vocab size if provided
     if model_config is not None:
         actual_vocab_size = semantic_mapper.get_vocab_size(use_actual=True)
-        
-        # If tag data is available, compute tag statistics and update config
-        # This is needed for tag prediction task, independent of multimodal fusion
-        num_tag_tokens = 0
-        if tag_ids_dict:
-            # Get max tag ID for each layer
-            max_tag_ids = [0] * num_layers
-            for tag_list in tag_ids_dict.values():
-                for layer_idx, tag_id in enumerate(tag_list[:num_layers]):
-                    if tag_id > 0:  # Ignore padding
-                        max_tag_ids[layer_idx] = max(max_tag_ids[layer_idx], tag_id)
-            
-            # Total tag tokens needed (sum of max_tag_id + 1 for each layer)
-            num_tag_tokens = sum(max_id + 1 for max_id in max_tag_ids)
-            
-            logger.info(f"Tag token statistics:")
-            for layer_idx, max_id in enumerate(max_tag_ids):
-                logger.info(f"  Layer {layer_idx + 1}: max_tag_id={max_id}, tokens_needed={max_id + 1}")
-            logger.info(f"  Total tag tokens: {num_tag_tokens}")
-            
-            # Store tag token offset (where tag tokens start in vocab)
-            model_config.tag_token_offset = actual_vocab_size
-            model_config.num_tag_tokens = num_tag_tokens
-            model_config.max_tag_ids_per_layer = max_tag_ids
-            
-            # Extend vocab size
-            extended_vocab_size = actual_vocab_size + num_tag_tokens
-            model_config.set_vocab_size(extended_vocab_size)
-            logger.info(f"Extended vocab_size: {actual_vocab_size} (semantic) + {num_tag_tokens} (tags) = {extended_vocab_size}")
-        else:
-            model_config.set_vocab_size(actual_vocab_size)
-            logger.info(f"Updated model config vocab_size to {actual_vocab_size}")
+        model_config.set_vocab_size(actual_vocab_size)
+        logger.info(f"Updated model config vocab_size to {actual_vocab_size}")
         
         # CRITICAL FIX: Update num_code_layers to match actual detected layers
         model_config.num_code_layers = num_layers
@@ -773,7 +694,6 @@ def create_datasets(
         codebook_vectors=codebook_vectors_dict,
         content_embeddings=content_embeddings_dict,
         collab_embeddings=collab_embeddings_dict,
-        tag_ids=tag_ids_dict,
         use_multimodal=use_multimodal
     )
     
@@ -786,7 +706,6 @@ def create_datasets(
         codebook_vectors=codebook_vectors_dict,
         content_embeddings=content_embeddings_dict,
         collab_embeddings=collab_embeddings_dict,
-        tag_ids=tag_ids_dict,
         use_multimodal=use_multimodal
     )
     
@@ -799,7 +718,6 @@ def create_datasets(
         codebook_vectors=codebook_vectors_dict,
         content_embeddings=content_embeddings_dict,
         collab_embeddings=collab_embeddings_dict,
-        tag_ids=tag_ids_dict,
         use_multimodal=use_multimodal
     )
     

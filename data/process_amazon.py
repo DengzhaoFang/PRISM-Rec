@@ -72,16 +72,14 @@ def parse_args():
     
     # Embedding configuration
     parser.add_argument('--embed_mode', type=str, default='tiger',
-                       choices=['tiger', 'prism'],
-                       help='Embedding mode: tiger (concat all) or prism (separate categories)')
+                       choices=['tiger'],
+                       help='Embedding mode: tiger (concat all attributes into one embedding)')
     parser.add_argument('--embed_model', type=str, default='sentence-t5',
                        choices=list(EMBEDDING_MODELS.keys()),
                        help='Embedding model to use')
     parser.add_argument('--model_source', type=str, default='modelscope',
                        choices=['huggingface', 'modelscope'],
                        help='Model download source: huggingface or modelscope')
-    parser.add_argument('--max_tags', type=int, default=5,
-                       help='Maximum number of category tags for prism mode')
     parser.add_argument('--generate_all_embeddings', action='store_true',
                        help='Generate embeddings for ALL items (item_emb_all.parquet) in addition to filtered items. By default, only filtered items are processed.')
     

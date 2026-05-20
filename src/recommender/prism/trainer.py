@@ -296,16 +296,12 @@ class Trainer:
         total_loss = 0.0
         total_main_loss = 0.0
         total_codebook_loss = 0.0
-        total_tag_loss = 0.0
         num_batches = 0
-        
-        # Reset MOE load balance loss counter for this epoch
+
         self.total_moe_lb_loss = 0.0
-        
-        # Check if using multi-modal features
+
         use_multimodal = self.training_config.use_multimodal_fusion
         use_codebook_pred = self.training_config.use_codebook_prediction
-        use_tag_pred = self.training_config.use_tag_prediction
         
         progress_bar = tqdm(
             self.train_loader,
@@ -333,25 +329,18 @@ class Trainer:
             collab_embs = None
             history_codebook_vecs = None
             target_codebook_vecs = None
-            target_tag_ids = None
-            
+
             if use_multimodal and 'history_content_embs' in batch:
                 content_embs = batch['history_content_embs'].to(self.device)
                 collab_embs = batch['history_collab_embs'].to(self.device)
-                # Add history_codebook_vecs if available
                 if 'history_codebook_vecs' in batch:
                     history_codebook_vecs = batch['history_codebook_vecs'].to(self.device)
-            
+
             if use_codebook_pred and 'target_codebook_vecs' in batch:
                 target_codebook_vecs = batch['target_codebook_vecs'].to(self.device)
-            
-            if use_tag_pred and 'target_tag_ids' in batch:
-                target_tag_ids = torch.tensor(batch['target_tag_ids']).to(self.device)
-            
-            # Forward pass
+
             self.optimizer.zero_grad()
-            
-            # Get model output (returns dict if using enhanced features)
+
             output = self.model(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
@@ -360,23 +349,19 @@ class Trainer:
                 collab_embs=collab_embs,
                 history_codebook_vecs=history_codebook_vecs,
                 target_codebook_vecs=target_codebook_vecs,
-                target_tag_ids=target_tag_ids,
                 item_ids=item_ids,
                 return_dict=True
             )
-            
-            # Extract losses
+
             if isinstance(output, dict):
                 loss = output['loss']
                 main_loss = output.get('main_loss', loss)
                 codebook_loss = output.get('codebook_loss', 0.0)
-                tag_loss = output.get('tag_loss', 0.0)
                 moe_load_balance_loss = output.get('moe_load_balance_loss', 0.0)
             else:
                 loss, _ = output
                 main_loss = loss
                 codebook_loss = 0.0
-                tag_loss = 0.0
                 moe_load_balance_loss = 0.0
             
             # Backward pass
@@ -402,8 +387,6 @@ class Trainer:
             total_main_loss += main_loss.item() if isinstance(main_loss, torch.Tensor) else main_loss
             if isinstance(codebook_loss, torch.Tensor):
                 total_codebook_loss += codebook_loss.item()
-            if isinstance(tag_loss, torch.Tensor):
-                total_tag_loss += tag_loss.item()
             num_batches += 1
             self.global_step += 1
             
@@ -420,8 +403,6 @@ class Trainer:
             }
             if use_codebook_pred and total_codebook_loss > 0:
                 postfix['cb'] = total_codebook_loss / num_batches
-            if use_tag_pred and total_tag_loss > 0:
-                postfix['tag'] = total_tag_loss / num_batches
             
             # Show MOE load balance loss if using MOE fusion
             if use_multimodal and hasattr(self, 'total_moe_lb_loss') and self.total_moe_lb_loss > 0:
@@ -439,8 +420,6 @@ class Trainer:
                 log_msg = f"Step {self.global_step}: loss={loss.item():.4f}, avg_loss={total_loss / num_batches:.4f}"
                 if use_codebook_pred and total_codebook_loss > 0:
                     log_msg += f", codebook_loss={total_codebook_loss / num_batches:.4f}"
-                if use_tag_pred and total_tag_loss > 0:
-                    log_msg += f", tag_loss={total_tag_loss / num_batches:.4f}"
                 # Log MOE load balance loss if using MOE fusion
                 if use_multimodal and hasattr(self, 'total_moe_lb_loss') and self.total_moe_lb_loss > 0:
                     log_msg += f", moe_lb_loss={self.total_moe_lb_loss / num_batches:.6f}"
@@ -526,8 +505,6 @@ class Trainer:
         }
         if use_codebook_pred and total_codebook_loss > 0:
             result['codebook_loss'] = total_codebook_loss / num_batches
-        if use_tag_pred and total_tag_loss > 0:
-            result['tag_loss'] = total_tag_loss / num_batches
         
         return result
     
@@ -546,14 +523,10 @@ class Trainer:
         
         # Check if using auxiliary tasks
         use_codebook_pred = self.training_config.use_codebook_prediction
-        use_tag_pred = self.training_config.use_tag_prediction
         use_multimodal = self.training_config.use_multimodal_fusion
-        
-        # Accumulators for auxiliary task metrics
+
         total_codebook_mse = 0.0
-        total_tag_acc = 0.0
         num_codebook_samples = 0
-        num_tag_samples = 0
         
         verbose = self.training_config.verbose
         
@@ -586,23 +559,17 @@ class Trainer:
                 collab_embs = None
                 history_codebook_vecs = None
                 target_codebook_vecs = None
-                target_tag_ids = None
-                
+
                 if use_multimodal and 'history_content_embs' in batch:
                     content_embs = batch['history_content_embs'].to(self.device)
                     collab_embs = batch['history_collab_embs'].to(self.device)
-                    # Add history_codebook_vecs if available
                     if 'history_codebook_vecs' in batch:
                         history_codebook_vecs = batch['history_codebook_vecs'].to(self.device)
-                
+
                 if use_codebook_pred and 'target_codebook_vecs' in batch:
                     target_codebook_vecs = batch['target_codebook_vecs'].to(self.device)
-                
-                if use_tag_pred and 'target_tag_ids' in batch:
-                    target_tag_ids = torch.tensor(batch['target_tag_ids']).to(self.device)
-                
-                # Forward pass for auxiliary tasks
-                if use_codebook_pred or use_tag_pred:
+
+                if use_codebook_pred:
                     output = self.model(
                         input_ids=input_ids,
                         attention_mask=attention_mask,
@@ -611,29 +578,15 @@ class Trainer:
                         collab_embs=collab_embs,
                         history_codebook_vecs=history_codebook_vecs,
                         target_codebook_vecs=target_codebook_vecs,
-                        target_tag_ids=target_tag_ids,
-                        item_ids=item_ids,  # Pass item_ids for adaptive temperature
+                        item_ids=item_ids,
                         return_dict=True
                     )
-                    
-                    # Compute codebook MSE
+
                     if use_codebook_pred and 'pred_codebook_vecs' in output and target_codebook_vecs is not None:
                         pred_cb = output['pred_codebook_vecs']
                         mse = torch.nn.functional.mse_loss(pred_cb, target_codebook_vecs)
                         total_codebook_mse += mse.item() * pred_cb.size(0)
                         num_codebook_samples += pred_cb.size(0)
-                    
-                    # Compute tag accuracy
-                    if use_tag_pred and 'pred_tag_logits' in output and target_tag_ids is not None:
-                        pred_tag_logits = output['pred_tag_logits']
-                        # Average accuracy across all layers
-                        layer_accs = []
-                        for layer_idx, logits in enumerate(pred_tag_logits):
-                            pred_tags = torch.argmax(logits, dim=-1)
-                            acc = (pred_tags == target_tag_ids[:, layer_idx]).float().mean()
-                            layer_accs.append(acc.item())
-                        total_tag_acc += sum(layer_accs) / len(layer_accs) * target_tag_ids.size(0)
-                        num_tag_samples += target_tag_ids.size(0)
                 
                 # Generate predictions for main task
                 # max_length = num_code_layers + 1 (for decoder start token that will be removed)
@@ -672,13 +625,9 @@ class Trainer:
         # Compute metrics
         metrics = self.metrics_calculator.compute()
         
-        # Add auxiliary task metrics
         if use_codebook_pred and num_codebook_samples > 0:
             metrics['codebook_mse'] = total_codebook_mse / num_codebook_samples
-        
-        if use_tag_pred and num_tag_samples > 0:
-            metrics['tag_accuracy'] = total_tag_acc / num_tag_samples
-        
+
         # Verbose logging: randomly sample and print 10 samples
         if verbose and len(all_batches) > 0:
             self._print_verbose_samples(all_batches, split_name)
@@ -886,8 +835,6 @@ class Trainer:
                 log_msg = f"Training - Total: {train_loss:.4f}, Main: {train_losses['main_loss']:.4f}"
                 if 'codebook_loss' in train_losses:
                     log_msg += f", Codebook: {train_losses['codebook_loss']:.4f}"
-                if 'tag_loss' in train_losses:
-                    log_msg += f", Tag: {train_losses['tag_loss']:.4f}"
                 log_msg += f" | LR: {current_lr:.6f}"
                 logger.info(log_msg)
             else:
@@ -911,8 +858,6 @@ class Trainer:
                 # Log auxiliary task metrics if available
                 if 'codebook_mse' in valid_metrics:
                     logger.info(f"  Codebook MSE: {valid_metrics['codebook_mse']:.6f}")
-                if 'tag_accuracy' in valid_metrics:
-                    logger.info(f"  Tag Accuracy: {valid_metrics['tag_accuracy']:.4f}")
                 
                 # Log epoch-level gate weight statistics for learned/attention modes
                 use_multimodal = self.training_config.use_multimodal_fusion
@@ -967,8 +912,6 @@ class Trainer:
                     # Log auxiliary task metrics if available
                     if 'codebook_mse' in test_metrics:
                         logger.info(f"  Codebook MSE: {test_metrics['codebook_mse']:.6f}")
-                    if 'tag_accuracy' in test_metrics:
-                        logger.info(f"  Tag Accuracy: {test_metrics['tag_accuracy']:.4f}")
                     
                     # CRITICAL FIX: Save best model immediately when new best is found
                     # Don't wait for the next save_every_n_epochs checkpoint

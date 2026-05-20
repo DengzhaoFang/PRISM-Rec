@@ -470,126 +470,6 @@ class CodebookPredictor(nn.Module):
         return torch.stack(predictions, dim=1)
 
 
-class TagPredictor(nn.Module):
-    """Predicts hierarchical tag IDs from hidden states at each decoding step.
-    
-    SSA (Semantic Structure Alignment): Predicts the tag ID for each layer
-    at the corresponding decoding position, binding structural information to ID prediction.
-    
-    Enhanced with hierarchical dependency: each layer's prediction conditions on
-    previous layers' predictions, modeling the hierarchical structure of tags.
-    """
-    
-    def __init__(self, d_model: int, num_tags_per_layer: List[int], dropout: float = 0.1):
-        """Initialize tag predictor.
-        
-        Args:
-            d_model: Model dimension
-            num_tags_per_layer: Number of tags for each layer
-            dropout: Dropout rate
-        """
-        super().__init__()
-        
-        self.num_tags_per_layer = num_tags_per_layer
-        self.n_layers = len(num_tags_per_layer)
-        self.d_model = d_model
-        
-        # Embedding dimension for previous layer's tag prediction (use logits summary)
-        self.tag_context_dim = d_model // 4
-        
-        # Project previous layer's tag logits to context
-        # Use max num_tags as input dim, will pad smaller layers
-        self.max_num_tags = max(num_tags_per_layer)
-        self.prev_tag_proj = nn.Linear(self.max_num_tags, self.tag_context_dim)
-        
-        # Learnable initial context for layer 0
-        self.initial_context = nn.Parameter(torch.zeros(1, self.tag_context_dim))
-        nn.init.normal_(self.initial_context, std=0.02)
-        
-        # Separate classifier for each layer - now takes hidden_state + prev_tag_context
-        input_dim = d_model + self.tag_context_dim
-        self.classifiers = nn.ModuleList([
-            nn.Sequential(
-                nn.Linear(input_dim, d_model // 2),
-                nn.LayerNorm(d_model // 2),
-                nn.ReLU(),
-                nn.Dropout(dropout),
-                nn.Linear(d_model // 2, num_tags)
-            )
-            for num_tags in num_tags_per_layer
-        ])
-    
-    def forward(self, hidden_states: torch.Tensor) -> List[torch.Tensor]:
-        """Predict tag IDs at each decoding step with hierarchical dependency.
-        
-        Args:
-            hidden_states: Decoder hidden states (B, target_len, d_model)
-                          target_len should be >= n_layers
-        
-        Returns:
-            List of logits for each layer [(B, num_tags_L1), (B, num_tags_L2), ...]
-            - Layer i's prediction uses hidden_states[:, i, :] and previous layer's prediction
-        """
-        batch_size = hidden_states.size(0)
-        target_len = hidden_states.size(1)
-        device = hidden_states.device
-        
-        predictions = []
-        prev_context = self.initial_context.expand(batch_size, -1)  # (B, tag_context_dim)
-        
-        for layer_idx, classifier in enumerate(self.classifiers):
-            # Use the hidden state at position layer_idx
-            if layer_idx < target_len:
-                layer_hidden = hidden_states[:, layer_idx, :]  # (B, d_model)
-            else:
-                # Fallback to last hidden state if target_len < n_layers
-                layer_hidden = hidden_states[:, -1, :]
-            
-            # Concatenate hidden state with previous layer context (hierarchical dependency)
-            combined_input = torch.cat([layer_hidden, prev_context], dim=-1)  # (B, d_model + tag_context_dim)
-            
-            pred = classifier(combined_input)  # (B, num_tags)
-            predictions.append(pred)
-            
-            # Update context for next layer using current prediction (soft attention over tags)
-            # Pad logits to max_num_tags for consistent projection
-            num_tags = self.num_tags_per_layer[layer_idx]
-            if num_tags < self.max_num_tags:
-                padded_logits = F.pad(pred, (0, self.max_num_tags - num_tags), value=float('-inf'))
-            else:
-                padded_logits = pred
-            
-            # Use softmax to get soft tag distribution, then project
-            soft_tags = F.softmax(padded_logits, dim=-1)  # (B, max_num_tags)
-            prev_context = self.prev_tag_proj(soft_tags)  # (B, tag_context_dim)
-        
-        return predictions
-
-
-def convert_tag_ids_to_tokens(tag_ids: torch.Tensor, tag_token_offset: int, max_tag_ids_per_layer: List[int]) -> torch.Tensor:
-    """Convert tag IDs to token IDs in vocabulary.
-    
-    Args:
-        tag_ids: Tag IDs (B, n_layers)
-        tag_token_offset: Offset where tag tokens start in vocab
-        max_tag_ids_per_layer: Max tag ID for each layer
-    
-    Returns:
-        Token IDs (B, n_layers)
-    """
-    batch_size, n_layers = tag_ids.shape
-    token_ids = torch.zeros_like(tag_ids)
-    
-    cumulative_offset = tag_token_offset
-    for layer_idx in range(n_layers):
-        # Map tag_id to token_id: token_id = tag_id + cumulative_offset
-        token_ids[:, layer_idx] = tag_ids[:, layer_idx] + cumulative_offset
-        # Update offset for next layer
-        cumulative_offset += (max_tag_ids_per_layer[layer_idx] + 1)
-    
-    return token_ids
-
-
 class ItemLayerEmbedding(nn.Module):
     """Item and layer position embeddings for hierarchical semantic IDs.
     
@@ -782,7 +662,6 @@ class TIGER(nn.Module):
         # Feature flags
         self.use_multimodal_fusion = training_config and training_config.use_multimodal_fusion
         self.use_codebook_prediction = training_config and training_config.use_codebook_prediction
-        self.use_tag_prediction = training_config and training_config.use_tag_prediction
         self.use_item_layer_emb = training_config and training_config.use_item_layer_emb
         self.use_adaptive_temperature = training_config and training_config.use_adaptive_temperature
         
@@ -877,23 +756,6 @@ class TIGER(nn.Module):
                 dropout=model_config.dropout_rate
             )
             logger.info(f"Codebook prediction enabled (latent_dim={training_config.moe_codebook_dim})")
-        
-        # Feature 3: Tag prediction
-        if self.use_tag_prediction:
-            # Get actual num_tags_per_layer from model config
-            if hasattr(model_config, 'max_tag_ids_per_layer') and model_config.max_tag_ids_per_layer:
-                num_tags_per_layer = [max_id + 1 for max_id in model_config.max_tag_ids_per_layer]
-            else:
-                # Fallback to placeholder values
-                num_tags_per_layer = [100, 200, 300]
-                logger.warning("max_tag_ids_per_layer not found in config, using placeholder values")
-            
-            self.tag_predictor = TagPredictor(
-                d_model=model_config.d_model,
-                num_tags_per_layer=num_tags_per_layer,
-                dropout=model_config.dropout_rate
-            )
-            logger.info(f"Tag prediction enabled with {num_tags_per_layer} tags per layer")
         
         logger.info(f"Initialized TIGER model with vocab_size={model_config.vocab_size}")
         logger.info(self.n_parameters)
@@ -1013,12 +875,11 @@ class TIGER(nn.Module):
         collab_embs: Optional[torch.Tensor] = None,
         history_codebook_vecs: Optional[torch.Tensor] = None,  # NEW: (B, max_items, n_layers, latent_dim)
         target_codebook_vecs: Optional[torch.Tensor] = None,
-        target_tag_ids: Optional[torch.Tensor] = None,
         item_ids: Optional[List[int]] = None,  # NEW: For adaptive temperature
         return_dict: bool = False
     ) -> Dict[str, torch.Tensor]:
         """Forward pass of the model with multi-source fusion.
-        
+
         Args:
             input_ids: Input token IDs (B, seq_len)
             attention_mask: Attention mask (B, seq_len)
@@ -1027,7 +888,6 @@ class TIGER(nn.Module):
             collab_embs: Collaborative embeddings (B, max_items, 64)
             history_codebook_vecs: Codebook vectors for history items (B, max_items, n_layers, latent_dim)
             target_codebook_vecs: Target codebook vectors (B, n_layers, latent_dim)
-            target_tag_ids: Target tag IDs (B, n_layers)
             return_dict: Whether to return a dictionary
         
         Returns:
@@ -1153,39 +1013,12 @@ class TIGER(nn.Module):
             result['codebook_loss'] = codebook_loss
             result['pred_codebook_vecs'] = pred_codebook_vecs
         
-        # Auxiliary task 2: Tag prediction
-        if self.use_tag_prediction and target_tag_ids is not None:
-            decoder_hidden_states = outputs.decoder_hidden_states[-1]
-            pred_tag_logits = self.tag_predictor(decoder_hidden_states)  # List of (B, num_tags)
-            
-            # Weighted cross-entropy loss for each layer
-            # Weight inversely proportional to sqrt(num_classes) to handle class imbalance
-            tag_losses = []
-            total_weight = 0.0
-            for layer_idx, logits in enumerate(pred_tag_logits):
-                num_tags = self.tag_predictor.num_tags_per_layer[layer_idx]
-                # Inverse sqrt weighting: more classes -> higher weight
-                layer_weight = (num_tags / self.tag_predictor.num_tags_per_layer[0]) ** 0.5
-                tag_loss = F.cross_entropy(logits, target_tag_ids[:, layer_idx])
-                tag_losses.append(layer_weight * tag_loss)
-                total_weight += layer_weight
-            
-            # Weighted average (normalize by total weight)
-            tag_loss_total = sum(tag_losses) / total_weight
-            result['tag_loss'] = tag_loss_total
-            result['pred_tag_logits'] = pred_tag_logits
-        
         # Combine losses
         total_loss = result['main_loss']
-        
-        # Use fixed weights for auxiliary tasks
+
         if 'codebook_loss' in result:
             weight = self.training_config.codebook_prediction_weight if self.training_config else 0.0005
             total_loss = total_loss + weight * result['codebook_loss']
-        
-        if 'tag_loss' in result:
-            weight = self.training_config.tag_prediction_weight if self.training_config else 0.0005
-            total_loss = total_loss + weight * result['tag_loss']
         
         # Add MOE load balancing loss if available
         if fusion_stats is not None and 'load_balance_loss' in fusion_stats:

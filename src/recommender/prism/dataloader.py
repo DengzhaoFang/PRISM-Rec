@@ -80,12 +80,6 @@ def collate_fn(batch: List[Dict], pad_token_id: int = 0, use_dynamic_batching: b
             torch.from_numpy(item['target_collab_emb']) for item in batch
         ])
     
-    if 'history_tag_ids' in batch[0]:
-        result['history_tag_ids'] = [item['history_tag_ids'] for item in batch]
-    
-    if 'target_tag_ids' in batch[0]:
-        result['target_tag_ids'] = [item['target_tag_ids'] for item in batch]
-    
     if 'history_item_ids' in batch[0]:
         result['history_item_ids'] = [item['history_item_ids'] for item in batch]
     
