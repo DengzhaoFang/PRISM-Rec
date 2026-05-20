@@ -143,15 +143,7 @@ class SinkhornIDReassigner:
         self.dataset = PRISMDataset(data_dir=data_dir)
         
         # Create model
-        num_classes_per_layer = [
-            self.dataset.tag_stats[f'n_L{i+2}'] + 1
-            for i in range(config.get('n_layers', 3))
-        ]
-        
-        self.model = create_prism_from_config(
-            config=config,
-            num_classes_per_layer=num_classes_per_layer
-        )
+        self.model = create_prism_from_config(config=config)
         
         self.model.load_state_dict(checkpoint['model_state_dict'])
         self.model = self.model.to(self.device)
