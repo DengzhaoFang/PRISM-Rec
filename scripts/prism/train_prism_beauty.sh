@@ -44,8 +44,6 @@ python train_prism.py \
     --num_workers 4 \
     --log_level INFO \
     \
-    --curriculum_warmup_epochs 5 \
-    \
     --use_gate_supervision \
     --gate_supervision_weight 0.8 \
     --gate_diversity_weight 3.5 \

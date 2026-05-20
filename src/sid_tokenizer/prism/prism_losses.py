@@ -198,42 +198,25 @@ class PRISMTotalLoss(nn.Module):
 
     def forward(
         self,
-        # Reconstruction inputs
         pred_content: torch.Tensor,
         target_content: torch.Tensor,
         pred_collab: torch.Tensor,
         target_collab: torch.Tensor,
-        # Commitment loss
         commitment_loss: Optional[torch.Tensor] = None,
-        # Gate supervision inputs
         gate_values: Optional[torch.Tensor] = None,
         popularity_scores: Optional[torch.Tensor] = None,
-        # DHR reconstruction target
         weighted_collab_target: Optional[torch.Tensor] = None,
-        # Optional curriculum weights
-        loss_weights: Optional[Dict[str, float]] = None
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
-        """
-        Compute total PRISM loss.
-
-        Returns:
-            total_loss: Combined loss scalar
-            loss_dict: Dictionary with all loss components
-        """
+        """Compute total PRISM loss."""
         loss_recon, dict_recon = self.recon_loss(
             pred_content, target_content, pred_collab, target_collab,
             weighted_collab_target=weighted_collab_target
         )
 
-        weights = loss_weights or {}
-        recon_scale = weights.get('recon', 1.0)
-        commit_scale = weights.get('commitment', 1.0)
-
-        scaled_recon = recon_scale * loss_recon
-        total_loss = scaled_recon
+        total_loss = loss_recon
 
         if commitment_loss is not None:
-            weighted_commit = commit_scale * self.commitment_weight * commitment_loss
+            weighted_commit = self.commitment_weight * commitment_loss
             total_loss += weighted_commit
             dict_commit = {'commitment': commitment_loss.item()}
         else:
@@ -243,8 +226,7 @@ class PRISMTotalLoss(nn.Module):
             loss_gate_sup, dict_gate_sup = self.gate_supervision_loss(
                 gate_values, popularity_scores
             )
-            gate_scale = weights.get('gate_supervision', 1.0)
-            total_loss += gate_scale * loss_gate_sup
+            total_loss += loss_gate_sup
         else:
             dict_gate_sup = {}
 
@@ -253,8 +235,6 @@ class PRISMTotalLoss(nn.Module):
             **dict_commit,
             **dict_gate_sup,
             'total_loss': total_loss.item(),
-            'scale_recon': recon_scale,
-            'scale_commitment': commit_scale
         }
 
         return total_loss, loss_dict

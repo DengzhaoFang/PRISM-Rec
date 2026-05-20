@@ -89,12 +89,6 @@ class PRISMTrainer:
         # Metrics tracking
         self.train_history = defaultdict(list)
         self.prev_epoch_metrics: Optional[Dict[str, float]] = None
-        self.last_loss_weights = {
-            'recon': 1.0,
-            'commitment': 1.0
-        }
-        self.curriculum_stage: Optional[str] = None
-        self.curriculum_settings = self._build_curriculum_settings()
         self.best_metrics = {
             'total_loss': float('inf'),
         }
@@ -262,14 +256,7 @@ class PRISMTrainer:
         """
         self.model.train()
         epoch_metrics = defaultdict(float)
-        loss_weights = self._get_loss_weights(epoch)
-        self.last_loss_weights = loss_weights
-        stage_label = loss_weights.get('stage')
-        if stage_label != self.curriculum_stage:
-            pretty_stage = stage_label or "full_objective"
-            self.logger.info(f"[Curriculum] Entering stage: {pretty_stage} (epoch {epoch})")
-            self.curriculum_stage = stage_label
-        
+
         # Track gate statistics if using gated fusion
         gate_stats = defaultdict(float)
         n_gate_samples = 0
@@ -325,7 +312,6 @@ class PRISMTrainer:
                 gate_values=gate_values,
                 popularity_scores=popularity_scores,
                 weighted_collab_target=weighted_collab_emb,
-                loss_weights=loss_weights
             )
             
             # Backward pass
@@ -368,9 +354,7 @@ class PRISMTrainer:
         # Average metrics
         num_batches = len(self.train_loader)
         epoch_metrics = {k: v / num_batches for k, v in epoch_metrics.items()}
-        epoch_metrics['loss_weight_recon'] = loss_weights['recon']
-        epoch_metrics['loss_weight_commitment'] = loss_weights['commitment']
-        
+
         # Add gate statistics to metrics
         if n_gate_samples > 0:
             for key in gate_stats:
@@ -394,30 +378,8 @@ class PRISMTrainer:
         
         return max(min_temp, init_temp * np.exp(-anneal_rate * epoch))
 
-    def _build_curriculum_settings(self) -> Dict[str, Any]:
-        """Define curriculum phases (simplified - no HSA losses)."""
-        enabled = not self.config.get('no_curriculum', False)
-        epochs = max(1, self.config.get('epochs', 100))
-        warmup_epochs = self.config.get('curriculum_warmup_epochs', max(3, epochs // 10))
-
-        return {
-            'enabled': enabled,
-            'warmup_epochs': warmup_epochs,
-            'min_perplexity_ratio': self.config.get('curriculum_min_perplexity_ratio', 0.35),
-            'perplexity_patience': self.config.get('perplexity_collapse_patience', 3),
-            'early_stop_cooldown': self.config.get('early_stop_cooldown', 3)
-        }
-
-    def _get_loss_weights(self, epoch: int) -> Dict[str, float]:
-        """Compute loss scales for the given epoch (recon + commitment only)."""
-        return {
-            'recon': 1.0,
-            'commitment': 1.0,
-            'stage': 'training'
-        }
-
     def _update_early_stopping(self, metrics: Dict[str, float], epoch: int) -> Tuple[bool, bool]:
-        """Early stopping with cooldown."""
+        """Early stopping with cooldown and perplexity guard."""
         patience = self.config.get('early_stop_patience', float('inf'))
         if not np.isfinite(patience):
             self._update_perplexity_guard(metrics)
@@ -427,8 +389,9 @@ class PRISMTrainer:
         total_loss = metrics.get('total_loss', float('inf'))
         improved = total_loss < (self.best_loss - min_delta)
 
-        cooldown = self.curriculum_settings.get('early_stop_cooldown', 3)
-        warmup_limit = self.curriculum_settings.get('warmup_epochs', 0) + cooldown
+        cooldown = self.config.get('early_stop_cooldown', 3)
+        warmup_epochs = self.config.get('early_stop_warmup_epochs', 5)
+        warmup_limit = warmup_epochs + cooldown
 
         if improved:
             self.best_loss = total_loss
@@ -442,7 +405,7 @@ class PRISMTrainer:
         self._update_perplexity_guard(metrics)
 
         should_stop = self.patience_counter >= patience
-        if self.perplexity_collapse_epochs >= self.curriculum_settings.get('perplexity_patience', 3):
+        if self.perplexity_collapse_epochs >= self.config.get('perplexity_collapse_patience', 3):
             should_stop = False
             self.patience_counter = max(0, self.patience_counter - 1)
 
@@ -462,8 +425,8 @@ class PRISMTrainer:
         avg_perp = float(sum(perps)) / len(perps)
         n_embed = max(1.0, float(self.config.get('n_embed', 256)))
         ratio = avg_perp / n_embed
-        
-        if ratio < self.curriculum_settings.get('min_perplexity_ratio', 0.35):
+
+        if ratio < self.config.get('perplexity_collapse_ratio', 0.35):
             self.perplexity_collapse_epochs += 1
         else:
             self.perplexity_collapse_epochs = 0
@@ -1183,12 +1146,6 @@ class PRISMTrainer:
                     f"std={train_metrics.get('gate_std', 0):.3f}"
                 )
 
-            self.logger.info(
-                "  Loss scales: "
-                f"recon={train_metrics.get('loss_weight_recon', 1.0):.2f}, "
-                f"commit={train_metrics.get('loss_weight_commitment', 1.0):.2f}"
-            )
-            
             # Track history
             for key, value in train_metrics.items():
                 self.train_history[key].append(value)
@@ -1336,17 +1293,15 @@ def parse_args():
     parser.add_argument('--resume', type=str, default=None,
                        help='Resume from checkpoint')
     
-    # Curriculum learning arguments
-    parser.add_argument('--no_curriculum', action='store_true',
-                       help='Disable curriculum learning for loss weights')
-    parser.add_argument('--curriculum_warmup_epochs', type=int, default=5,
-                       help='Epochs to focus on reconstruction before turning on other losses')
-    parser.add_argument('--curriculum_min_perplexity_ratio', type=float, default=0.35,
-                       help='Minimum acceptable perplexity ratio before triggering collapse guard')
-    parser.add_argument('--perplexity_collapse_patience', type=int, default=3,
-                       help='Number of consecutive low-perplexity epochs before intervention')
+    # Early stopping and perplexity guard
     parser.add_argument('--early_stop_cooldown', type=int, default=3,
                        help='Extra epochs after warmup before early stopping can trigger')
+    parser.add_argument('--early_stop_warmup_epochs', type=int, default=5,
+                       help='Epochs to wait before early stopping can trigger')
+    parser.add_argument('--perplexity_collapse_patience', type=int, default=3,
+                       help='Number of consecutive low-perplexity epochs before intervention')
+    parser.add_argument('--perplexity_collapse_ratio', type=float, default=0.35,
+                       help='Minimum acceptable perplexity ratio before triggering collapse guard')
     
     # Hierarchical k-means initialization arguments
     parser.add_argument('--no_hierarchical_kmeans_init', action='store_true',
