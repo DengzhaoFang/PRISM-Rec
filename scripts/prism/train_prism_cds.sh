@@ -9,7 +9,7 @@
 cd ../../src/sid_tokenizer/prism
 
 python train_prism.py \
-    --data_path ../../../dataset/Amazon-CDs/processed/cds-prism-sentenceT5base/CDs \
+    --data_path ../../../dataset/Amazon-CDs/processed/cds-tiger-sentenceT5base/CDs \
     --output_dir ../../../scripts/output/prism_tokenizer/cds/3-256-32-ema-only-5-core-items\
     \
     --n_layers 3 \

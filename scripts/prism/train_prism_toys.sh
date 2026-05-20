@@ -8,7 +8,7 @@
 cd ../../src/sid_tokenizer/prism
 
 python train_prism.py \
-    --data_path ../../../dataset/Amazon-Toys/processed/toys-prism-sentenceT5base/Toys \
+    --data_path ../../../dataset/Amazon-Toys/processed/toys-tiger-sentenceT5base/Toys \
     --output_dir ../../../scripts/output/prism_tokenizer/toys/3-256-32-ema-only-5-core-items  \
     \
     --n_layers 3 \

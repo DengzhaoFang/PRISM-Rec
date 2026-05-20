@@ -8,7 +8,7 @@
 cd ../../src/sid_tokenizer/prism
 
 python train_prism.py \
-    --data_path ../../../dataset/Amazon-Sports/processed/sports-prism-sentenceT5base/Sports \
+    --data_path ../../../dataset/Amazon-Sports/processed/sports-tiger-sentenceT5base/Sports \
     --output_dir ../../../scripts/output/prism_tokenizer/sports/3-256-32-ema-only-5-core-items  \
     \
     --n_layers 3 \

@@ -299,7 +299,7 @@ class SemanticIDGenerator:
         Save semantic IDs and statistics.
         
         Args:
-            results: Dictionary with IDs and predictions
+            results: Dictionary with IDs and metadata
             stats: Dictionary with all statistics
         """
         self.logger.info("Saving results...")

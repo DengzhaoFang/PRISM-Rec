@@ -9,8 +9,8 @@
 cd ../../src/sid_tokenizer/prism
 
 python train_prism.py \
-    --data_path ../../../dataset/Amazon-Beauty/processed/beauty-prism-sentenceT5base/Beauty \
-    --output_dir ../../../scripts/output/prism_tokenizer/beauty/3-256-32-wo-hsa-4 \
+    --data_path ../../../dataset/Amazon-Beauty/processed/beauty-tiger-sentenceT5base/Beauty \
+    --output_dir ../../../scripts/output/prism_tokenizer/beauty/3-256-32-ema-only-5-core-items \
     \
     --n_layers 3 \
     --n_embed_per_layer "256,256,256" \

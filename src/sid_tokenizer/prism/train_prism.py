@@ -132,20 +132,17 @@ class PRISMTrainer:
         batch_size = self.config.get('batch_size', 256)
         num_workers = self.config.get('num_workers', 4)
         max_items = self.config.get('max_items', None)
-        n_layers = self.config.get('n_layers', 4)
 
         self.train_loader, self.dataset = create_dataloaders(
             data_dir=data_dir,
             batch_size=batch_size,
             num_workers=num_workers,
             max_items=max_items,
-            n_layers=n_layers
         )
 
         self.logger.info(f"✓ Dataset loaded: {len(self.dataset)} items")
         self.logger.info(f"  Batch size: {batch_size}")
         self.logger.info(f"  Number of batches: {len(self.train_loader)}")
-        self.logger.info(f"  Tag statistics: {self.dataset.tag_stats}")
     
     def setup_model(self):
         """Initialize PRISM model"""
