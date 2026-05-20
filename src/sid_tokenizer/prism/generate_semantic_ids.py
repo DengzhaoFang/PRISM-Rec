@@ -5,8 +5,7 @@ Semantic ID Generation and Analysis Tool
 Generate semantic IDs from trained PRISM model and analyze:
 1. ID uniqueness and collision rates
 2. Hierarchical overlap rates (layer-wise prefix sharing)
-3. Tag prediction accuracy
-4. Codebook usage statistics
+3. Codebook usage statistics
 
 Optionally apply Sinkhorn algorithm for collision-free ID reassignment.
 """
@@ -92,28 +91,19 @@ class SemanticIDGenerator:
     def load_dataset(self):
         """Load dataset"""
         self.logger.info(f"Loading dataset from {self.data_dir}...")
-        
+
         self.dataset = PRISMDataset(
             data_dir=str(self.data_dir),
             max_items=self.config.get('max_items', None)
         )
-        
-        # Now create model with proper num_classes
-        num_classes_per_layer = [
-            self.dataset.tag_stats[f'n_L{i+2}'] + 1
-            for i in range(self.config.get('n_layers', 3))
-        ]
-        
-        from HID_VAE import create_prism_from_config
-        self.model = create_prism_from_config(
-            config=self.config,
-            num_classes_per_layer=num_classes_per_layer
-        )
-        
+
+        from PRISM import create_prism_from_config
+        self.model = create_prism_from_config(config=self.config)
+
         self.model.load_state_dict(self.checkpoint['model_state_dict'])
         self.model = self.model.to(self.device)
         self.model.eval()
-        
+
         self.logger.info(f"✓ Model and dataset loaded")
         self.logger.info(f"  Items: {len(self.dataset)}")
         self.logger.info(f"  Layers: {self.config['n_layers']}")
@@ -133,50 +123,30 @@ class SemanticIDGenerator:
         
         all_item_ids = []
         all_semantic_ids = []
-        all_tag_ids = []
-        all_predictions = []
-        
+
         dataloader = torch.utils.data.DataLoader(
             self.dataset,
             batch_size=batch_size,
             shuffle=False,
             num_workers=4
         )
-        
+
         with torch.no_grad():
             for batch in tqdm(dataloader, desc="Generating IDs"):
                 content_emb = batch['content_emb'].to(self.device)
                 collab_emb = batch['collab_emb'].to(self.device)
-                tag_ids = batch['tag_ids']  # Keep on CPU
                 item_ids = batch['item_id']
-                
-                # Generate semantic IDs
+
                 semantic_ids = self.model.generate_semantic_ids(
                     content_emb, collab_emb
                 )
-                
-                # Get tag predictions if classifiers available
-                if self.model.classifiers is not None:
-                    outputs = self.model(
-                        content_emb, collab_emb, return_codes=True
-                    )
-                    predictions = outputs['predictions']
-                    pred_classes = [torch.argmax(p, dim=1).cpu() for p in predictions]
-                    pred_classes = torch.stack(pred_classes, dim=1)  # (B, n_layers)
-                else:
-                    pred_classes = torch.zeros_like(semantic_ids)
-                
+
                 all_item_ids.append(item_ids.cpu().numpy())
                 all_semantic_ids.append(semantic_ids.cpu().numpy())
-                all_tag_ids.append(tag_ids.cpu().numpy())
-                all_predictions.append(pred_classes.cpu().numpy())
-        
-        # Concatenate all batches
+
         results = {
             'item_ids': np.concatenate(all_item_ids, axis=0),
             'semantic_ids': np.concatenate(all_semantic_ids, axis=0),
-            'tag_ids': np.concatenate(all_tag_ids, axis=0),
-            'predictions': np.concatenate(all_predictions, axis=0)
         }
         
         self.logger.info(f"✓ Generated {len(results['item_ids'])} semantic IDs")
@@ -277,50 +247,6 @@ class SemanticIDGenerator:
         
         return overlap_stats
     
-    def analyze_tag_accuracy(
-        self, 
-        predictions: np.ndarray, 
-        tag_ids: np.ndarray
-    ) -> Dict:
-        """
-        Analyze tag prediction accuracy.
-        
-        Args:
-            predictions: Predicted tag IDs (n_items, n_layers)
-            tag_ids: Ground truth tag IDs (n_items, n_layers)
-            
-        Returns:
-            accuracy_stats: Dictionary with accuracy per layer
-        """
-        self.logger.info("Analyzing tag prediction accuracy...")
-        
-        n_layers = predictions.shape[1]
-        accuracy_stats = {}
-        
-        for layer in range(n_layers):
-            pred = predictions[:, layer]
-            target = tag_ids[:, layer]
-            
-            # Filter out PAD tokens (ID 0)
-            valid_mask = target != 0
-            
-            if valid_mask.sum() > 0:
-                correct = (pred[valid_mask] == target[valid_mask]).sum()
-                total = valid_mask.sum()
-                accuracy = correct / total
-            else:
-                accuracy = 0.0
-                total = 0
-            
-            accuracy_stats[f'layer_{layer+1}'] = {
-                'accuracy': float(accuracy),
-                'n_valid': int(total)
-            }
-            
-            self.logger.info(f"  Layer {layer+1} (L{layer+2}): {accuracy:.2%} ({total} valid)")
-        
-        return accuracy_stats
-    
     def analyze_codebook_usage(self, semantic_ids: np.ndarray) -> Dict:
         """
         Analyze codebook usage statistics.
@@ -378,20 +304,14 @@ class SemanticIDGenerator:
         """
         self.logger.info("Saving results...")
         
-        # Save semantic IDs as parquet
         df = pd.DataFrame({
             'ItemID': results['item_ids'],
             'semantic_id': [tuple(sid) for sid in results['semantic_ids']],
-            'tag_ids': [tuple(tid) for tid in results['tag_ids']],
-            'predictions': [tuple(pid) for pid in results['predictions']]
         })
-        
-        # Add individual layer IDs as columns
+
         n_layers = results['semantic_ids'].shape[1]
         for i in range(n_layers):
             df[f'id_layer{i+1}'] = results['semantic_ids'][:, i]
-            df[f'tag_layer{i+1}'] = results['tag_ids'][:, i]
-            df[f'pred_layer{i+1}'] = results['predictions'][:, i]
         
         parquet_path = self.output_dir / 'semantic_ids.parquet'
         df.to_parquet(parquet_path, index=False)
@@ -455,13 +375,7 @@ class SemanticIDGenerator:
             results['semantic_ids']
         )
         
-        # 3. Tag accuracy
-        stats['tag_accuracy'] = self.analyze_tag_accuracy(
-            results['predictions'], 
-            results['tag_ids']
-        )
-        
-        # 4. Codebook usage
+        # 3. Codebook usage
         stats['codebook_usage'] = self.analyze_codebook_usage(
             results['semantic_ids']
         )

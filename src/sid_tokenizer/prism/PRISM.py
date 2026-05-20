@@ -5,7 +5,6 @@ Main model architecture combining:
 1. Multi-modal encoder (content + collaborative embeddings)
 2. RQ-VAE quantization with hierarchical codebooks
 3. Multi-modal decoders (separate for content and collaborative)
-4. Hierarchical classifiers for tag prediction
 """
 
 import torch
@@ -14,7 +13,6 @@ import torch.nn.functional as F
 from typing import Dict, List, Tuple, Optional
 
 from RQ_VAE import RQVAEQuantizer, QuantizeMode
-from hierarchical_classifiers import HierarchicalClassifiers
 
 
 class MultiModalEncoder(nn.Module):
@@ -306,8 +304,7 @@ class PRISM(nn.Module):
        - Encodes: fused (768D) -> z (32D)
     2. RQ-VAE: z -> z_q (hierarchical quantization)
     3. Multi-modal decoder: z_q -> (content_recon, collab_recon)
-    4. Hierarchical classifiers: quantized codes -> tag predictions
-    
+
     Key Innovation:
     - Gated fusion solves dimension imbalance and noise pollution
     - Automatically adapts to item popularity (long-tail vs popular)
@@ -321,26 +318,22 @@ class PRISM(nn.Module):
         latent_dim: int = 32,
         # RQ-VAE parameters
         n_layers: int = 3,
-        n_embed: int = 256,  # Default uniform size (can be overridden by n_embed_per_layer)
-        n_embed_per_layer: Optional[List[int]] = None,  # Variable codebook sizes per layer
+        n_embed: int = 256,
+        n_embed_per_layer: Optional[List[int]] = None,
         # Encoder/decoder architecture
         encoder_hidden_dims: Optional[List[int]] = None,
         decoder_hidden_dims: Optional[List[int]] = None,
-        use_gated_fusion: bool = True,  # Use gated additive fusion (recommended)
-        use_dual_decoder: bool = True,  # Use dual decoder heads (recommended)
-        # Classification parameters
-        num_classes_per_layer: Optional[List[int]] = None,
+        use_gated_fusion: bool = True,
+        use_dual_decoder: bool = True,
         # Quantization parameters
         use_ema: bool = True,
         ema_decay: float = 0.99,
         beta: float = 0.25,
         quantize_mode: QuantizeMode = QuantizeMode.ROTATION,
-        # Other parameters
-        dropout: float = 0.1
     ):
         """
         Initialize PRISM.
-        
+
         Args:
             content_dim: Content embedding dimension
             collab_dim: Collaborative embedding dimension
@@ -354,33 +347,29 @@ class PRISM(nn.Module):
             use_gated_fusion: Use gated additive fusion for multi-modal encoding (recommended)
             use_dual_decoder: If True, use separate decoder heads for content and collab.
                             If False, use single decoder head for concatenated embedding.
-            num_classes_per_layer: Number of tag classes per layer [n_L2, n_L3, n_L4]
             use_ema: Use EMA for codebook updates
             ema_decay: EMA decay rate
             beta: Commitment loss weight
             quantize_mode: Quantization mode (STE, ROTATION, GUMBEL_SOFTMAX)
-            dropout: Dropout probability
         """
         super().__init__()
-        
+
         self.content_dim = content_dim
         self.collab_dim = collab_dim
         self.latent_dim = latent_dim
         self.n_layers = n_layers
         self.use_dual_decoder = use_dual_decoder
-        
-        # Setup variable codebook sizes
+
         if n_embed_per_layer is None:
             self.n_embed_per_layer = [n_embed] * n_layers
         else:
             assert len(n_embed_per_layer) == n_layers, \
                 f"n_embed_per_layer must have {n_layers} elements, got {len(n_embed_per_layer)}"
             self.n_embed_per_layer = n_embed_per_layer
-        
-        self.n_embed = n_embed  # Keep for backward compatibility
+
+        self.n_embed = n_embed
         self.beta = beta
-        
-        # Multi-modal encoder with gated fusion
+
         self.encoder = MultiModalEncoder(
             content_dim=content_dim,
             collab_dim=collab_dim,
@@ -388,8 +377,7 @@ class PRISM(nn.Module):
             hidden_dims=encoder_hidden_dims,
             use_gated_fusion=use_gated_fusion
         )
-        
-        # RQ-VAE quantizers (one per layer with variable codebook sizes)
+
         self.quantizers = nn.ModuleList([
             RQVAEQuantizer(
                 n_embed=self.n_embed_per_layer[i],
@@ -401,8 +389,7 @@ class PRISM(nn.Module):
             )
             for i in range(n_layers)
         ])
-        
-        # Multi-modal decoder
+
         self.decoder = MultiModalDecoder(
             latent_dim=latent_dim,
             content_dim=content_dim,
@@ -410,17 +397,6 @@ class PRISM(nn.Module):
             hidden_dims=decoder_hidden_dims,
             use_dual_decoder=use_dual_decoder
         )
-        
-        # Hierarchical classifiers (if num_classes provided)
-        if num_classes_per_layer is not None:
-            self.classifiers = HierarchicalClassifiers(
-                codebook_dim=latent_dim,
-                num_classes_per_layer=num_classes_per_layer,
-                n_layers=n_layers,
-                dropout=dropout
-            )
-        else:
-            self.classifiers = None
     
     def encode(
         self, 
@@ -499,15 +475,6 @@ class PRISM(nn.Module):
         """Decode quantized latents to multi-modal outputs."""
         return self.decoder(z_q)
     
-    def classify(
-        self, 
-        quantized_codes: List[torch.Tensor]
-    ) -> List[torch.Tensor]:
-        """Predict tags from quantized codes."""
-        if self.classifiers is None:
-            raise ValueError("Classifiers not initialized")
-        return self.classifiers(quantized_codes)
-    
     def forward(
         self,
         content_emb: torch.Tensor,
@@ -517,56 +484,44 @@ class PRISM(nn.Module):
     ) -> Dict[str, torch.Tensor]:
         """
         Forward pass through PRISM.
-        
+
         Args:
             content_emb: Content embeddings (batch_size, 768)
             collab_emb: Collaborative embeddings (batch_size, 64)
             temperature: Temperature for quantization
             return_codes: Whether to return quantized codes
-            
+
         Returns:
             output_dict: Dictionary containing:
                 - content_recon: Reconstructed content
-                - collab_recon: Reconstructed collaborative (targets weighted_collab in DHR mode)
-                - weighted_collab_emb: Gate-weighted collab embedding (for DHR reconstruction target)
+                - collab_recon: Reconstructed collaborative
+                - weighted_collab_emb: Gate-weighted collab embedding
                 - z_q: Quantized latent (if return_codes=True)
                 - quantized_codes: List of codes per layer (if return_codes=True)
                 - encoding_indices: List of indices per layer (if return_codes=True)
                 - codebook_loss: Codebook loss
                 - perplexities: List of perplexities
-                - predictions: Tag predictions (if classifiers available)
         """
-        # Encode (get weighted_collab for DHR reconstruction target)
-        encode_result = self.encode(content_emb, collab_emb, return_weighted_collab=True)
-        z, weighted_collab_emb = encode_result
-        
-        # Quantize
+        z, weighted_collab_emb = self.encode(content_emb, collab_emb, return_weighted_collab=True)
+
         z_q, quantized_codes, encoding_indices, codebook_loss, perplexities = \
             self.quantize(z, temperature)
-        
-        # Decode
+
         content_recon, collab_recon = self.decode(z_q)
-        
-        # Build output dictionary
+
         output_dict = {
             'content_recon': content_recon,
             'collab_recon': collab_recon,
-            'weighted_collab_emb': weighted_collab_emb,  # DHR target: denoised collab
+            'weighted_collab_emb': weighted_collab_emb,
             'codebook_loss': codebook_loss,
             'perplexities': perplexities
         }
-        
-        # Add codes if requested
+
         if return_codes:
             output_dict['z_q'] = z_q
             output_dict['quantized_codes'] = quantized_codes
             output_dict['encoding_indices'] = encoding_indices
-        
-        # Add tag predictions if classifiers available
-        if self.classifiers is not None:
-            predictions = self.classify(quantized_codes)
-            output_dict['predictions'] = predictions
-        
+
         return output_dict
     
     def get_codebooks(self) -> List[torch.Tensor]:
@@ -624,17 +579,13 @@ class PRISM(nn.Module):
         return self.n_embed_per_layer
 
 
-def create_prism_from_config(
-    config: Dict,
-    num_classes_per_layer: Optional[List[int]] = None
-) -> PRISM:
+def create_prism_from_config(config: Dict) -> PRISM:
     """
     Factory function to create PRISM from configuration dictionary.
-    
+
     Args:
         config: Configuration dictionary with model parameters
-        num_classes_per_layer: Number of tag classes per layer
-        
+
     Returns:
         model: Initialized PRISM model
     """
@@ -644,16 +595,14 @@ def create_prism_from_config(
         latent_dim=config.get('latent_dim', 32),
         n_layers=config.get('n_layers', 3),
         n_embed=config.get('n_embed', 256),
-        n_embed_per_layer=config.get('n_embed_per_layer'),  # Support variable sizes
+        n_embed_per_layer=config.get('n_embed_per_layer'),
         encoder_hidden_dims=config.get('encoder_hidden_dims'),
         decoder_hidden_dims=config.get('decoder_hidden_dims'),
-        use_gated_fusion=config.get('use_gated_fusion', True),  # Default: use gated fusion
-        use_dual_decoder=config.get('use_dual_decoder', True),  # Default: use dual decoder
-        num_classes_per_layer=num_classes_per_layer,
+        use_gated_fusion=config.get('use_gated_fusion', True),
+        use_dual_decoder=config.get('use_dual_decoder', True),
         use_ema=config.get('use_ema', True),
         ema_decay=config.get('ema_decay', 0.99),
         beta=config.get('beta', 0.25),
         quantize_mode=QuantizeMode(config.get('quantize_mode', 'rotation')),
-        dropout=config.get('dropout', 0.1)
     )
 

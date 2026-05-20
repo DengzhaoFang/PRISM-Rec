@@ -142,9 +142,6 @@ class PRISMDataset(Dataset):
         # Analyze tag statistics
         self._compute_tag_statistics()
         
-        # Build tag ID to class index mapping for each layer
-        self._build_tag_to_class_mapping()
-        
         print(f"✓ Dataset loaded: {self.num_items} items")
         print(f"  Content embedding dim: {self.content_embeddings.shape[1]}")
         print(f"  Collab embedding dim: {self.collab_embeddings.shape[1]}")
@@ -178,136 +175,38 @@ class PRISMDataset(Dataset):
             for i in range(len(self.num_tags_per_level))
         }
     
-    def _build_tag_to_class_mapping(self):
-        """
-        Build mapping from global tag IDs to per-layer class indices.
-        Class index 0 is reserved for PAD token.
-        """
-        # Collect unique tag IDs at each level (starting from L2)
-        tag_sets_per_level = [set() for _ in range(self.max_tag_level)]
-        
-        for tag_ids in self.tag_ids_per_item:
-            for level_idx, tag_id in enumerate(tag_ids):
-                if level_idx > 0:  # Skip L1
-                    tag_sets_per_level[level_idx].add(tag_id)
-        
-        # Create mappings for each layer (L2, L3, L4, ...)
-        # Map: global_tag_id -> local_class_index (1-indexed, 0 is PAD)
-        self.tag_to_class_maps = []
-        
-        for level_idx in range(1, self.max_tag_level):  # Start from L2
-            unique_tags = sorted(list(tag_sets_per_level[level_idx]))
-            
-            # Create mapping: tag_id -> class_index (starting from 1, 0 is PAD)
-            tag_to_class = {tag_id: idx + 1 for idx, tag_id in enumerate(unique_tags)}
-            tag_to_class[self.pad_token_id] = 0  # PAD token maps to 0
-            
-            self.tag_to_class_maps.append(tag_to_class)
-        
-        print(f"✓ Tag to class mapping built:")
-        for i, mapping in enumerate(self.tag_to_class_maps[:3]):  # Show first 3 layers
-            print(f"  Layer {i+2}: {len(mapping)-1} unique tags (+PAD)")
-    
-    def get_tag_embeddings_per_level(
-        self, 
-        n_layers: int = 3
-    ) -> List[torch.Tensor]:
-        """
-        Get all unique tag embeddings organized by level, ordered by mapped class indices.
-        
-        Args:
-            n_layers: Number of RQ layers (typically 3)
-            
-        Returns:
-            tag_embeddings_per_layer: List of tensors
-                [L2_tags (n_L2, 768), L3_tags (n_L3, 768), L4_tags (n_L4, 768)]
-                Each tensor is ordered by class index (1 to n_classes)
-        """
-        tag_embeddings_per_layer = []
-        
-        for layer_idx in range(min(n_layers, len(self.tag_to_class_maps))):
-            # Get the mapping for this layer
-            tag_to_class = self.tag_to_class_maps[layer_idx]
-            
-            # Create list of (class_idx, tag_id) pairs, excluding PAD
-            tag_class_pairs = [
-                (class_idx, tag_id) 
-                for tag_id, class_idx in tag_to_class.items() 
-                if class_idx > 0  # Exclude PAD (class_idx=0)
-            ]
-            
-            # Sort by class index
-            tag_class_pairs.sort(key=lambda x: x[0])
-            
-            # Get embeddings in sorted order
-            if len(tag_class_pairs) > 0:
-                tag_embs = torch.stack([
-                    self.tag_id_to_embedding[tag_id]
-                    for class_idx, tag_id in tag_class_pairs
-                    if tag_id in self.tag_id_to_embedding
-                ])
-                tag_embeddings_per_layer.append(tag_embs)
-            else:
-                # Empty tensor if no tags at this level
-                tag_embeddings_per_layer.append(torch.empty(0, 768))
-        
-        # Fill remaining layers with empty tensors if needed
-        while len(tag_embeddings_per_layer) < n_layers:
-            tag_embeddings_per_layer.append(torch.empty(0, 768))
-        
-        return tag_embeddings_per_layer
-    
     def __len__(self) -> int:
         return self.num_items
-    
+
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         """
         Get a single item with all modalities.
-        
+
         Returns:
             data_dict: Dictionary containing:
                 - item_id: Item identifier
                 - content_emb: Content embedding (768D)
                 - collab_emb: Collaborative embedding (64D)
-                - tag_ids: Mapped class indices at each level (padded to n_layers)
+                - tag_ids: Raw tag IDs at each level (padded to n_layers)
                 - tag_mask: Binary mask (1 for valid tags, 0 for padding)
                 - num_tags: Number of valid tags
+                - popularity_score: Item popularity score
         """
-        # Get embeddings
         content_emb = self.content_embeddings[idx]
         collab_emb = self.collab_embeddings[idx]
-        
-        # Get tags (excluding L1 'Beauty')
+
         global_tag_ids = self.tag_ids_per_item[idx][1:]  # Skip L1
         num_tags = len(global_tag_ids)
-        
-        # Use configured n_layers (dynamic, not hardcoded)
-        # Truncate if more layers available than needed, pad if less
+
         if num_tags > self.n_layers:
-            # Truncate to n_layers
             global_tag_ids = global_tag_ids[:self.n_layers]
             num_tags = self.n_layers
-        
-        # Convert global tag IDs to per-layer class indices
-        mapped_tag_ids = []
-        for layer_idx, global_tag_id in enumerate(global_tag_ids):
-            if layer_idx < len(self.tag_to_class_maps):
-                # Map global ID to local class index
-                local_class_idx = self.tag_to_class_maps[layer_idx].get(
-                    global_tag_id, 
-                    0  # Default to PAD if not found
-                )
-                mapped_tag_ids.append(local_class_idx)
-            else:
-                mapped_tag_ids.append(0)  # PAD for extra layers
-        
-        # Pad to n_layers
-        padded_tag_ids = mapped_tag_ids + [0] * (self.n_layers - len(mapped_tag_ids))
+
+        padded_tag_ids = global_tag_ids + [0] * (self.n_layers - len(global_tag_ids))
         tag_mask = [1] * num_tags + [0] * (self.n_layers - num_tags)
-        
-        # Get popularity score
+
         popularity_score = self.popularity_scores[idx]
-        
+
         return {
             'item_id': self.item_ids[idx],
             'content_emb': content_emb,
