@@ -35,7 +35,7 @@ except ImportError:
 # Import PRISM components
 from PRISM import PRISM, create_prism_from_config
 from multimodal_dataset import PRISMDataset, create_dataloaders
-from hid_losses import PRISMTotalLoss
+from prism_losses import PRISMTotalLoss
 
 # Import schedulers
 try:
