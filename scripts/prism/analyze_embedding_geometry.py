@@ -149,19 +149,20 @@ class EmbeddingAnalyzer:
         else:
             state_dict = checkpoint
         
-        # Filter out incompatible codebook_predictor keys (old format vs new format)
-        # The codebook_predictor is not needed for embedding analysis
+        # Filter out incompatible keys that are not needed for embedding analysis
+        # - codebook_predictor: old format vs new format
+        # - tag_predictor: shape mismatch due to different fusion configurations
         filtered_state_dict = {}
         skipped_keys = []
         
         for key, value in state_dict.items():
-            if 'codebook_predictor' in key:
+            if 'codebook_predictor' in key or 'tag_predictor' in key:
                 skipped_keys.append(key)
             else:
                 filtered_state_dict[key] = value
         
         if skipped_keys:
-            logger.info(f"Skipped {len(skipped_keys)} codebook_predictor keys (not needed for embedding analysis)")
+            logger.info(f"Skipped {len(skipped_keys)} incompatible keys (not needed for embedding analysis)")
         
         model.load_state_dict(filtered_state_dict, strict=False)
         
@@ -214,19 +215,20 @@ class EmbeddingAnalyzer:
         else:
             state_dict = checkpoint
         
-        # Filter out incompatible codebook_predictor keys (old format vs new format)
-        # The codebook_predictor is not needed for embedding analysis
+        # Filter out incompatible keys that are not needed for embedding analysis
+        # - codebook_predictor: old format vs new format
+        # - tag_predictor: shape mismatch due to different fusion configurations
         filtered_state_dict = {}
         skipped_keys = []
         
         for key, value in state_dict.items():
-            if 'codebook_predictor' in key:
+            if 'codebook_predictor' in key or 'tag_predictor' in key:
                 skipped_keys.append(key)
             else:
                 filtered_state_dict[key] = value
         
         if skipped_keys:
-            logger.info(f"Skipped {len(skipped_keys)} codebook_predictor keys (not needed for embedding analysis)")
+            logger.info(f"Skipped {len(skipped_keys)} incompatible keys (not needed for embedding analysis)")
         
         model.load_state_dict(filtered_state_dict, strict=False)
         
@@ -718,24 +720,25 @@ class EmbeddingAnalyzer:
         plot_scatter(ax_tiger, tiger_2d, labels, 'TIGER Recommendation')
         plot_scatter(ax_prism, prism_2d, labels, 'PRISM Recommendation')
         
-        plt.tight_layout()
+        # Tight layout with minimal padding to eliminate white borders
+        plt.tight_layout(pad=0.1)
         
-        # Save in multiple formats
+        # Save in multiple formats with zero padding for seamless borders
         base_path = f"{output_dir}/embedding_{method}_comparison"
         
         # PNG
         png_path = f"{base_path}.png"
-        plt.savefig(png_path, dpi=300, bbox_inches='tight', facecolor='white', pad_inches=0.02)
+        plt.savefig(png_path, dpi=300, bbox_inches='tight', facecolor='white', pad_inches=0)
         logger.info(f"Saved PNG: {png_path}")
         
         # PDF (vector format for LaTeX)
         pdf_path = f"{base_path}.pdf"
-        plt.savefig(pdf_path, format='pdf', bbox_inches='tight', facecolor='white', pad_inches=0.02)
+        plt.savefig(pdf_path, format='pdf', bbox_inches='tight', facecolor='white', pad_inches=0)
         logger.info(f"Saved PDF: {pdf_path}")
         
         # SVG (vector format for editing)
         svg_path = f"{base_path}.svg"
-        plt.savefig(svg_path, format='svg', bbox_inches='tight', facecolor='white', pad_inches=0.02)
+        plt.savefig(svg_path, format='svg', bbox_inches='tight', facecolor='white', pad_inches=0)
         logger.info(f"Saved SVG: {svg_path}")
         
         plt.close()
@@ -863,12 +866,13 @@ class EmbeddingAnalyzer:
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         
-        plt.tight_layout()
+        # Tight layout with minimal padding to eliminate white borders
+        plt.tight_layout(pad=0.1)
         
-        # Save in multiple formats
+        # Save in multiple formats with zero padding for seamless borders
         base_path = output_path.rsplit('.', 1)[0]
-        plt.savefig(f"{base_path}.png", dpi=300, bbox_inches='tight', facecolor='white')
-        plt.savefig(f"{base_path}.pdf", dpi=300, bbox_inches='tight', facecolor='white')
+        plt.savefig(f"{base_path}.png", dpi=300, bbox_inches='tight', facecolor='white', pad_inches=0)
+        plt.savefig(f"{base_path}.pdf", dpi=300, bbox_inches='tight', facecolor='white', pad_inches=0)
         logger.info(f"Metrics comparison plot saved to {base_path}.png and {base_path}.pdf")
         
         plt.close()

@@ -313,12 +313,12 @@ def plot_distance_distributions(
     ax.yaxis.grid(True, linestyle='--', alpha=0.25, linewidth=0.5)
     ax.set_axisbelow(True)
     
-    # 紧凑布局
-    plt.tight_layout(pad=0.3)
+    # 紧凑布局，消除白边
+    plt.tight_layout(pad=0.1)
     plt.savefig(output_path, bbox_inches='tight', dpi=300, 
-               facecolor='white', edgecolor='none', pad_inches=0.05)
+               facecolor='white', edgecolor='none', pad_inches=0)
     plt.savefig(output_path.replace('.pdf', '.png'), bbox_inches='tight', dpi=300,
-               facecolor='white', edgecolor='none', pad_inches=0.05)
+               facecolor='white', edgecolor='none', pad_inches=0)
     logger.info(f"图片已保存: {output_path}")
     plt.close()
 

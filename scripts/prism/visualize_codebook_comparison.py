@@ -239,24 +239,25 @@ def plot_comparison(
     plot_scatter(ax_tiger, tiger_2d, tiger_labels, 'TIGER Codebook')
     plot_scatter(ax_prism, prism_2d, prism_labels, 'PRISM Codebook')
     
-    plt.tight_layout()
+    # Tight layout with minimal padding to eliminate white borders
+    plt.tight_layout(pad=0.1)
     
-    # Save in multiple formats
+    # Save in multiple formats with zero padding for seamless borders
     base_path = output_path.rsplit('.', 1)[0]
     
     # PNG
     png_path = f"{base_path}.png"
-    plt.savefig(png_path, dpi=dpi, bbox_inches='tight', facecolor='white', pad_inches=0.02)
+    plt.savefig(png_path, dpi=dpi, bbox_inches='tight', facecolor='white', pad_inches=0)
     print(f"Saved PNG: {png_path}")
     
     # PDF (vector format for LaTeX)
     pdf_path = f"{base_path}.pdf"
-    plt.savefig(pdf_path, format='pdf', bbox_inches='tight', facecolor='white', pad_inches=0.02)
+    plt.savefig(pdf_path, format='pdf', bbox_inches='tight', facecolor='white', pad_inches=0)
     print(f"Saved PDF: {pdf_path}")
     
     # SVG (vector format for editing)
     svg_path = f"{base_path}.svg"
-    plt.savefig(svg_path, format='svg', bbox_inches='tight', facecolor='white', pad_inches=0.02)
+    plt.savefig(svg_path, format='svg', bbox_inches='tight', facecolor='white', pad_inches=0)
     print(f"Saved SVG: {svg_path}")
     
     plt.close()
