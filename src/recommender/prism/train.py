@@ -180,120 +180,35 @@ Examples:
     # NEW FEATURES: Multi-source Information Fusion
     # ============================================================
     
-    # Feature 1: Codebook Vector Prediction
-    parser.add_argument(
-        '--use_codebook_prediction',
-        action='store_true',
-        help='Add auxiliary task to predict target codebook vectors'
-    )
-    parser.add_argument(
-        '--codebook_prediction_weight',
-        type=float,
-        default=0.1,
-        help='Loss weight for codebook prediction (default: 0.1)'
-    )
-    
-    # Feature 3: Multi-source Embedding Fusion
-    # Feature 3: Multi-source Embedding Fusion
+    # Feature: Multi-source DSI Fusion (purified features)
     parser.add_argument(
         '--use_multimodal_fusion',
         action='store_true',
-        help='Fuse ID, content, and collaborative embeddings'
+        help='Enable DSI: 3-way fusion of ID + purified_content + purified_collab'
     )
     parser.add_argument(
         '--fusion_gate_type',
-        type=str,
-        default='learned',
-        choices=['learned', 'fixed', 'attention', 'moe'],
-        help='Type of fusion gating mechanism (default: learned)'
+        type=str, default='moe', choices=['learned', 'fixed', 'attention', 'moe'],
+        help='Fusion gating mechanism (default: moe)'
     )
-    parser.add_argument(
-        '--content_emb_weight',
-        type=float,
-        default=0.5,
-        help='Fixed weight for content embeddings (used if fusion_gate_type=fixed)'
-    )
-    parser.add_argument(
-        '--collab_emb_weight',
-        type=float,
-        default=0.3,
-        help='Fixed weight for collaborative embeddings (used if fusion_gate_type=fixed)'
-    )
-    parser.add_argument(
-        '--id_emb_weight',
-        type=float,
-        default=0.2,
-        help='Fixed weight for ID embeddings (used if fusion_gate_type=fixed)'
-    )
-    parser.add_argument(
-        '--freeze_content_emb',
-        action='store_true',
-        default=True,
-        help='Freeze content embeddings (default: True)'
-    )
-    parser.add_argument(
-        '--freeze_collab_emb',
-        action='store_true',
-        default=True,
-        help='Freeze collaborative embeddings (default: True)'
-    )
-    
-    # Collaborative embedding path
-    parser.add_argument(
-        '--collab_embedding_path',
-        type=str,
-        default=None,
-        help='Path to collaborative embeddings NPZ file (optional override)'
-    )
-    
-    # Layer-specific fusion
-    parser.add_argument(
-        '--use_layer_specific_fusion',
-        action='store_true',
-        help='Use layer-specific projections for fusion (recommended for better performance)'
-    )
-    
-    # MOE Fusion Parameters
-    parser.add_argument(
-        '--moe_num_experts',
-        type=int,
-        default=4,
-        help='Number of expert networks for MOE fusion (default: 4)'
-    )
-    parser.add_argument(
-        '--moe_expert_hidden_dim',
-        type=int,
-        default=512,
-        help='Hidden dimension for each expert in MOE fusion (default: 512)'
-    )
-    parser.add_argument(
-        '--moe_top_k',
-        type=int,
-        default=2,
-        help='Number of experts to activate per input in MOE fusion (default: 2)'
-    )
-    parser.add_argument(
-        '--moe_use_load_balancing',
-        action='store_true',
-        help='Use load balancing loss in MOE fusion to ensure all experts are used'
-    )
-    parser.add_argument(
-        '--moe_load_balance_weight',
-        type=float,
-        default=0.01,
-        help='Weight for load balancing loss in MOE fusion (default: 0.01)'
-    )
-    parser.add_argument(
-        '--moe_use_improved_projection',
-        action='store_true',
-        help='Use improved projection mechanism (Content:768→256, ID:128→128, Collab:64→64, +Codebook:32)'
-    )
-    parser.add_argument(
-        '--moe_codebook_dim',
-        type=int,
-        default=32,
-        help='Codebook embedding dimension for improved projection (default: 32)'
-    )
+
+    # MoE parameters
+    parser.add_argument('--moe_num_experts', type=int, default=3,
+                        help='Number of MoE experts (default: 3)')
+    parser.add_argument('--moe_expert_hidden_dim', type=int, default=256,
+                        help='Expert hidden dimension (default: 256)')
+    parser.add_argument('--moe_top_k', type=int, default=2,
+                        help='Top-K experts per input (default: 2)')
+    parser.add_argument('--moe_use_load_balancing', action='store_true',
+                        help='Use MoE load balancing loss')
+    parser.add_argument('--moe_load_balance_weight', type=float, default=0.001,
+                        help='Load balancing loss weight (default: 0.001)')
+
+    # Purified embedding paths
+    parser.add_argument('--purified_content_path', type=str, default=None,
+                        help='Path to purified content embeddings (h_t_hat, 128D)')
+    parser.add_argument('--purified_collab_path', type=str, default=None,
+                        help='Path to purified collab embeddings (h_c_hat, 128D)')
     
     # ============================================================
     # NEW FEATURES: Structural Improvements
@@ -379,8 +294,9 @@ def _load_data(logger, config: dict):
     
     # Check if multimodal fusion is enabled
     use_multimodal = config['training'].use_multimodal_fusion
-    collab_embedding_path = config['data'].collab_embedding_path
-    
+    purified_content_path = config['data'].purified_content_path
+    purified_collab_path = config['data'].purified_collab_path
+
     train_dataset, valid_dataset, test_dataset, semantic_mapper = create_datasets(
         sequence_data_dir=config['data'].sequence_data_path,
         semantic_mapping_path=config['data'].semantic_mapping_path,
@@ -390,7 +306,8 @@ def _load_data(logger, config: dict):
         pad_token_id=config['model'].pad_token_id,
         model_config=config['model'],
         codebook_sizes=codebook_sizes,
-        collab_embedding_path=collab_embedding_path,
+        purified_content_path=purified_content_path,
+        purified_collab_path=purified_collab_path,
         use_multimodal=use_multimodal
     )
     
@@ -517,35 +434,20 @@ def _build_config_kwargs(args) -> dict:
     if args.lr_scheduler is not None:
         config_kwargs['lr_scheduler'] = args.lr_scheduler
     
-    if args.use_codebook_prediction:
-        config_kwargs['use_codebook_prediction'] = True
-        config_kwargs['codebook_prediction_weight'] = args.codebook_prediction_weight
-    
     if args.use_multimodal_fusion:
         config_kwargs['use_multimodal_fusion'] = True
         config_kwargs['fusion_gate_type'] = args.fusion_gate_type
-        config_kwargs['content_emb_weight'] = args.content_emb_weight
-        config_kwargs['collab_emb_weight'] = args.collab_emb_weight
-        config_kwargs['id_emb_weight'] = args.id_emb_weight
-        config_kwargs['freeze_content_emb'] = args.freeze_content_emb
-        config_kwargs['freeze_collab_emb'] = args.freeze_collab_emb
-        
-        # Layer-specific fusion
-        if args.use_layer_specific_fusion:
-            config_kwargs['use_layer_specific_fusion'] = True
-        
-        # MOE fusion parameters
         if args.fusion_gate_type == 'moe':
             config_kwargs['moe_num_experts'] = args.moe_num_experts
             config_kwargs['moe_expert_hidden_dim'] = args.moe_expert_hidden_dim
             config_kwargs['moe_top_k'] = args.moe_top_k
             config_kwargs['moe_use_load_balancing'] = args.moe_use_load_balancing
             config_kwargs['moe_load_balance_weight'] = args.moe_load_balance_weight
-            config_kwargs['moe_use_improved_projection'] = args.moe_use_improved_projection
-            config_kwargs['moe_codebook_dim'] = args.moe_codebook_dim
-    
-    if args.collab_embedding_path is not None:
-        config_kwargs['collab_embedding_path'] = args.collab_embedding_path
+
+    if args.purified_content_path is not None:
+        config_kwargs['purified_content_path'] = args.purified_content_path
+    if args.purified_collab_path is not None:
+        config_kwargs['purified_collab_path'] = args.purified_collab_path
     
     # NEW FEATURES: Structural Improvements
     if args.use_dynamic_batching:

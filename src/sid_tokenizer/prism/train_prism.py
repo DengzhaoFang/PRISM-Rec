@@ -2,7 +2,7 @@
 """
 PRISM Training Script
 
-Train Hierarchical ID VAE with multi-modal inputs and tag-guided learning.
+Train Hierarchical ID VAE with IDE + MCD pipeline and optional SACO loss.
 """
 
 import os
@@ -23,21 +23,18 @@ from tqdm import tqdm
 import numpy as np
 from sklearn.cluster import KMeans
 
-# Try to import matplotlib (optional, for visualizations)
 try:
     import matplotlib
-    matplotlib.use('Agg')  # Non-interactive backend
+    matplotlib.use('Agg')
     import matplotlib.pyplot as plt
     MATPLOTLIB_AVAILABLE = True
 except ImportError:
     MATPLOTLIB_AVAILABLE = False
 
-# Import PRISM components
 from PRISM import PRISM, create_prism_from_config
 from multimodal_dataset import PRISMDataset, create_dataloaders
 from prism_losses import PRISMTotalLoss
 
-# Import schedulers
 try:
     from schedulers import WarmupCosineScheduler, ExponentialSchedulerWithWarmup
     SCHEDULERS_AVAILABLE = True
@@ -46,67 +43,41 @@ except ImportError:
 
 
 class PRISMTrainer:
-    """Main trainer class for PRISM"""
-    
+    """Main trainer class for PRISM with IDE + MCD + SACO support."""
+
     def __init__(self, config: Dict[str, Any]):
-        """
-        Initialize trainer.
-        
-        Args:
-            config: Training configuration dictionary
-        """
         self.config = config
         self.device = torch.device(config.get('device', 'cuda' if torch.cuda.is_available() else 'cpu'))
         self.output_dir = Path(config['output_dir'])
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Setup logging
+
         self.setup_logging()
-        
-        # Initialize components
         self.logger.info("Initializing PRISM trainer...")
         self.logger.info(f"Configuration: {json.dumps(config, indent=2)}")
-        
-        # Load dataset
+
         self.setup_data()
-        
-        # Initialize model
         self.setup_model()
-        
-        # Initialize optimizer and scheduler
         self.setup_optimizer()
-        
-        # Initialize loss function
         self.setup_loss()
-        
-        # Training state
+
         self.current_epoch = 0
         self.global_step = 0
         self.best_loss = float('inf')
         self.patience_counter = 0
         self.perplexity_collapse_epochs = 0
-        
-        # Metrics tracking
+
         self.train_history = defaultdict(list)
         self.prev_epoch_metrics: Optional[Dict[str, float]] = None
-        self.best_metrics = {
-            'total_loss': float('inf'),
-        }
-        
-        self.logger.info("✓ PRISM trainer initialized successfully")
-    
+        self.best_metrics = {'total_loss': float('inf')}
+
+        self.logger.info("PRISM trainer initialized successfully")
+
     def setup_logging(self):
-        """Setup logging configuration"""
         log_level = getattr(logging, self.config.get('log_level', 'INFO'))
-        
-        # Create logger
         self.logger = logging.getLogger('PRISMTrainer')
         self.logger.setLevel(log_level)
-        
-        # Clear existing handlers
         self.logger.handlers.clear()
-        
-        # Console handler
+
         console_handler = logging.StreamHandler()
         console_handler.setLevel(log_level)
         console_formatter = logging.Formatter(
@@ -114,20 +85,16 @@ class PRISMTrainer:
         )
         console_handler.setFormatter(console_formatter)
         self.logger.addHandler(console_handler)
-        
-        # File handler
+
         log_file = self.output_dir / 'training.log'
         file_handler = logging.FileHandler(log_file)
         file_handler.setLevel(log_level)
         file_handler.setFormatter(console_formatter)
         self.logger.addHandler(file_handler)
-        
         self.logger.info(f"Logging to {log_file}")
-    
-    def setup_data(self):
-        """Setup datasets and dataloaders"""
-        self.logger.info("Loading dataset...")
 
+    def setup_data(self):
+        self.logger.info("Loading dataset...")
         data_dir = self.config['data_path']
         batch_size = self.config.get('batch_size', 256)
         num_workers = self.config.get('num_workers', 4)
@@ -140,23 +107,26 @@ class PRISMTrainer:
             max_items=max_items,
         )
 
-        self.logger.info(f"✓ Dataset loaded: {len(self.dataset)} items")
+        self.logger.info(f"Dataset loaded: {len(self.dataset)} items")
         self.logger.info(f"  Batch size: {batch_size}")
         self.logger.info(f"  Number of batches: {len(self.train_loader)}")
-    
-    def setup_model(self):
-        """Initialize PRISM model"""
-        self.logger.info("Initializing PRISM model...")
+        if self.dataset.has_cooc:
+            self.logger.info(f"  Co-occurrence graph: ENABLED")
+        else:
+            self.logger.info(f"  Co-occurrence graph: DISABLED (SACO will be skipped)")
 
+    def setup_model(self):
+        self.logger.info("Initializing PRISM model...")
         self.model = create_prism_from_config(config=self.config)
         self.model = self.model.to(self.device)
 
         total_params = sum(p.numel() for p in self.model.parameters())
         trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
-
-        self.logger.info(f"✓ Model initialized")
+        self.logger.info(f"Model initialized")
         self.logger.info(f"  Total parameters: {total_params:,}")
         self.logger.info(f"  Trainable parameters: {trainable_params:,}")
+        self.logger.info(f"  IDE: {'ENABLED' if self.config.get('use_ide', True) else 'DISABLED'}")
+        self.logger.info(f"  MCD: {'ENABLED' if self.config.get('use_mcd', True) else 'DISABLED'}")
 
         codebook_sizes = self.model.get_codebook_sizes()
         self.logger.info(f"  Codebook sizes per layer: {codebook_sizes}")
@@ -164,35 +134,30 @@ class PRISMTrainer:
             self.logger.info(f"    Layer {i+1}: {size} codes")
 
         self._initialize_codebooks_hierarchical()
-    
+
     def setup_optimizer(self):
-        """Setup optimizer and learning rate scheduler"""
         self.logger.info("Initializing optimizer and scheduler...")
-        
         lr = self.config.get('learning_rate', 1e-3)
         weight_decay = self.config.get('weight_decay', 0.0)
-        
-        # Optimizer
+
         self.optimizer = optim.AdamW(
             self.model.parameters(),
             lr=lr,
             weight_decay=weight_decay,
             betas=(0.9, 0.999)
         )
-        
-        # Learning rate scheduler
+
         if self.config.get('use_scheduler', False) and SCHEDULERS_AVAILABLE:
             scheduler_type = self.config.get('scheduler_type', 'warmup_cosine')
-            
             total_steps = self.config['epochs'] * len(self.train_loader)
             warmup_steps = int(total_steps * self.config.get('warmup_ratio', 0.1))
-            
+
             if scheduler_type == 'warmup_cosine':
                 self.scheduler = WarmupCosineScheduler(
                     optimizer=self.optimizer,
                     warmup_steps=warmup_steps,
                     total_steps=total_steps,
-                    min_lr_ratio=0.01  # 1% of initial LR
+                    min_lr_ratio=0.01
                 )
             elif scheduler_type == 'exponential':
                 self.scheduler = ExponentialSchedulerWithWarmup(
@@ -204,179 +169,144 @@ class PRISMTrainer:
                 )
             else:
                 raise ValueError(f"Unknown scheduler type: {scheduler_type}")
-            
-            self.logger.info(f"✓ Scheduler: {scheduler_type}")
-            self.logger.info(f"  Warmup steps: {warmup_steps}")
-            self.logger.info(f"  Total steps: {total_steps}")
+            self.logger.info(f"  Scheduler: {scheduler_type}, warmup steps: {warmup_steps}, total: {total_steps}")
         else:
             self.scheduler = None
-            self.logger.info("No scheduler used")
-        
-        self.logger.info(f"✓ Optimizer: AdamW (lr={lr}, wd={weight_decay})")
-    
+            self.logger.info("  No scheduler used")
+
+        self.logger.info(f"  Optimizer: AdamW (lr={lr}, wd={weight_decay})")
+
     def setup_loss(self):
-        """Initialize loss function"""
         self.logger.info("Initializing loss function...")
 
+        use_saco = (
+            self.config.get('use_saco', False) and self.dataset.has_cooc
+        )
+
         self.loss_fn = PRISMTotalLoss(
-            lambda_content=self.config.get('lambda_content', 1.0),
-            lambda_collab=self.config.get('lambda_collab', 1.0),
-            use_dual_decoder=self.config.get('use_dual_decoder', True),
             commitment_weight=self.config.get('beta', 0.25),
-            use_gate_supervision=self.config.get('use_gate_supervision', False),
-            gate_supervision_weight=self.config.get('gate_supervision_weight', 0.1),
-            gate_diversity_weight=self.config.get('gate_diversity_weight', 0.5),
-            gate_target_std=self.config.get('gate_target_std', 0.2),
+            use_saco=use_saco,
+            lambda_sac=self.config.get('lambda_sac', 0.1),
+            saco_temperature=self.config.get('saco_temperature', 0.07),
         )
 
         self.loss_fn = self.loss_fn.to(self.device)
+        self.logger.info("Loss function initialized")
+        self.logger.info(f"  UPR: MSE(z_dec, z_clean.detach()) — 256D unified reconstruction")
+        self.logger.info(f"  β (commitment)={self.config.get('beta', 0.25)}")
+        self.logger.info(f"  SACO: {'ENABLED' if use_saco else 'DISABLED'}")
+        if use_saco:
+            self.logger.info(f"    λ_sac={self.config.get('lambda_sac', 0.1)}")
+            self.logger.info(f"    τ_saco={self.config.get('saco_temperature', 0.07)}")
 
-        self.logger.info("✓ Loss function initialized")
-        self.logger.info(f"  Decoder mode: {'Dual' if self.config.get('use_dual_decoder', True) else 'Single'}")
-        self.logger.info(f"  Lambda content: {self.config.get('lambda_content', 1.0)}")
-        self.logger.info(f"  Lambda collab: {self.config.get('lambda_collab', 1.0)}")
-        self.logger.info(f"  Beta (commitment): {self.config.get('beta', 0.25)}")
-        if self.config.get('use_gate_supervision', False):
-            self.logger.info(f"  Gate supervision: ENABLED")
-            self.logger.info(f"    Weight: {self.config.get('gate_supervision_weight', 0.1)}")
-            self.logger.info(f"    Target std: {self.config.get('gate_target_std', 0.2)}")
-    
     def train_epoch(self, epoch: int) -> Dict[str, float]:
-        """
-        Train for one epoch.
-        
-        Args:
-            epoch: Current epoch number
-            
-        Returns:
-            metrics: Dictionary of averaged metrics
-        """
         self.model.train()
         epoch_metrics = defaultdict(float)
 
-        # Track gate statistics if using gated fusion
-        gate_stats = defaultdict(float)
-        n_gate_samples = 0
-        
+        # Track consistency statistics (replaces old gate tracking)
+        consistency_stats = defaultdict(float)
+        n_consistency_samples = 0
+
         progress_bar = tqdm(
-            self.train_loader, 
+            self.train_loader,
             desc=f"Epoch {epoch}/{self.config['epochs']}"
         )
-        
+
         for batch_idx, batch in enumerate(progress_bar):
-            # Move batch to device
             content_emb = batch['content_emb'].to(self.device)
             collab_emb = batch['collab_emb'].to(self.device)
-            popularity_scores = batch['popularity_score'].to(self.device)
-            
-            # Collect gate statistics (if using gated fusion)
-            if self.config.get('use_gated_fusion', True) and hasattr(self.model.encoder, 'gate_network'):
-                with torch.no_grad():
-                    gate = self.model.encoder.gate_network(collab_emb)  # (B, 768)
-                    mean_gate = gate.mean(dim=1)  # (B,) - average trust per item
-                    
-                    gate_stats['mean'] += mean_gate.mean().item()
-                    gate_stats['std'] += mean_gate.std().item()
-                    gate_stats['min'] += mean_gate.min().item()
-                    gate_stats['max'] += mean_gate.max().item()
-                    gate_stats['median'] += mean_gate.median().item()
-                    n_gate_samples += 1
-            
+            item_ids = batch['item_id'].cpu().numpy()
+
             # Forward pass
             outputs = self.model(
                 content_emb=content_emb,
                 collab_emb=collab_emb,
                 temperature=self._get_temperature(epoch),
-                return_codes=True
+                return_codes=True,
             )
 
-            content_recon = outputs['content_recon']
-            collab_recon = outputs['collab_recon']
-            weighted_collab_emb = outputs.get('weighted_collab_emb', None)
+            z_dec = outputs['z_dec']
+            z_clean = outputs['z_clean']
             vq_loss = outputs['codebook_loss']
+            z = outputs.get('z', None)
 
-            if self.config.get('use_gate_supervision', False) and hasattr(self.model.encoder, 'gate_network'):
-                gate_values = self.model.encoder.gate_network(collab_emb)
-            else:
-                gate_values = None
+            # Track MCD consistency
+            consistency = outputs.get('consistency')
+            if consistency is not None:
+                consistency_stats['mean'] += consistency.mean().item()
+                consistency_stats['std'] += consistency.std().item()
+                consistency_stats['min'] += consistency.min().item()
+                consistency_stats['max'] += consistency.max().item()
+                n_consistency_samples += 1
+
+            # Get positive pairs for SACO
+            pos_a, pos_b = None, None
+            if self.loss_fn.use_saco and z is not None:
+                pos_a, pos_b = self.dataset.get_positive_pairs(item_ids)
+                pos_a = pos_a.to(self.device)
+                pos_b = pos_b.to(self.device)
 
             total_loss, loss_dict = self.loss_fn(
-                pred_content=content_recon,
-                target_content=content_emb,
-                pred_collab=collab_recon,
-                target_collab=collab_emb,
+                z_dec=z_dec,
+                z_clean=z_clean,
                 commitment_loss=vq_loss,
-                gate_values=gate_values,
-                popularity_scores=popularity_scores,
-                weighted_collab_target=weighted_collab_emb,
+                z=z,
+                pos_indices_a=pos_a,
+                pos_indices_b=pos_b,
             )
-            
-            # Backward pass
+
             self.optimizer.zero_grad()
             total_loss.backward()
-            
-            # Gradient clipping
+
             if self.config.get('grad_clip', 0) > 0:
                 torch.nn.utils.clip_grad_norm_(
-                    self.model.parameters(), 
+                    self.model.parameters(),
                     self.config['grad_clip']
                 )
-            
+
             self.optimizer.step()
-            
-            # Update scheduler
+
             if self.scheduler is not None:
                 self.scheduler.step()
-            
-            # Update metrics
+
             for key, value in loss_dict.items():
                 epoch_metrics[key] += value
-            
-            # Add perplexity metrics
+
             for i, perp in enumerate(outputs['perplexities']):
                 epoch_metrics[f'perplexity_layer{i+1}'] += perp
-            
-            # Update progress bar
+
             postfix_dict = {
                 'loss': loss_dict['total_loss'],
-                'recon': loss_dict['recon_total'],
-                'lr': self.optimizer.param_groups[0]['lr']
+                'upr': loss_dict['upr'],
+                'lr': self.optimizer.param_groups[0]['lr'],
             }
-            if 'gate_supervision' in loss_dict:
-                postfix_dict['gate_sup'] = loss_dict['gate_supervision']
+            if 'saco' in loss_dict:
+                postfix_dict['saco'] = loss_dict['saco']
+            if n_consistency_samples > 0:
+                postfix_dict['cons'] = consistency_stats['mean'] / n_consistency_samples
             progress_bar.set_postfix(postfix_dict)
-            
+
             self.global_step += 1
-        
-        # Average metrics
+
         num_batches = len(self.train_loader)
         epoch_metrics = {k: v / num_batches for k, v in epoch_metrics.items()}
 
-        # Add gate statistics to metrics
-        if n_gate_samples > 0:
-            for key in gate_stats:
-                epoch_metrics[f'gate_{key}'] = gate_stats[key] / n_gate_samples
-        
+        if n_consistency_samples > 0:
+            for key in consistency_stats:
+                epoch_metrics[f'consistency_{key}'] = consistency_stats[key] / n_consistency_samples
+
         self.prev_epoch_metrics = epoch_metrics
-        
         return epoch_metrics
-    
+
     def _get_temperature(self, epoch: int) -> float:
-        """
-        Get temperature for Gumbel-Softmax (if used).
-        Gradually anneal from init_temp to min_temp.
-        """
         if self.config.get('quantize_mode', 'rotation') != 'gumbel_softmax':
-            return 0.2  # Not used for other modes
-        
+            return 0.2
         init_temp = self.config.get('init_temp', 1.0)
         min_temp = self.config.get('min_temp', 0.1)
         anneal_rate = self.config.get('anneal_rate', 0.00003)
-        
         return max(min_temp, init_temp * np.exp(-anneal_rate * epoch))
 
     def _update_early_stopping(self, metrics: Dict[str, float], epoch: int) -> Tuple[bool, bool]:
-        """Early stopping with cooldown and perplexity guard."""
         patience = self.config.get('early_stop_patience', float('inf'))
         if not np.isfinite(patience):
             self._update_perplexity_guard(metrics)
@@ -409,7 +339,6 @@ class PRISMTrainer:
         return should_stop, improved
 
     def _update_perplexity_guard(self, metrics: Dict[str, float]) -> None:
-        """Track consecutive epochs with low perplexity to prevent collapse."""
         perps = []
         for i in range(self.config.get('n_layers', 3)):
             key = f'perplexity_layer{i+1}'
@@ -418,7 +347,7 @@ class PRISMTrainer:
         if not perps:
             self.perplexity_collapse_epochs = 0
             return
-        
+
         avg_perp = float(sum(perps)) / len(perps)
         n_embed = max(1.0, float(self.config.get('n_embed', 256)))
         ratio = avg_perp / n_embed
@@ -429,22 +358,21 @@ class PRISMTrainer:
             self.perplexity_collapse_epochs = 0
 
     def _initialize_codebooks_hierarchical(self) -> None:
-        """Hierarchical K-means initialization to encourage coarse-to-fine structure."""
         if self.config.get('no_hierarchical_kmeans_init', False):
             self.logger.info("Skipping hierarchical k-means initialization (disabled).")
             return
-        
+
         quantizers = getattr(self.model, 'quantizers', [])
         if not quantizers:
             return
-        
+
         already_initialized = all(
             bool(getattr(q, '_initialized', torch.tensor(False)).item()) for q in quantizers
         )
         if already_initialized:
             self.logger.info("Codebooks already initialized, skipping hierarchical k-means.")
             return
-        
+
         sample_size = min(
             self.config.get('kmeans_init_samples', 8192),
             len(self.dataset)
@@ -452,10 +380,10 @@ class PRISMTrainer:
         if sample_size < self.config.get('n_embed', 256):
             self.logger.warning("Not enough samples for hierarchical k-means initialization; skipping.")
             return
-        
+
         self.logger.info(f"Running hierarchical k-means initialization with {sample_size} samples...")
         indices = torch.randperm(len(self.dataset))[:sample_size]
-        
+
         latent_batches = []
         batch_size = min(self.config.get('kmeans_batch_size', 1024), sample_size)
         for start in range(0, sample_size, batch_size):
@@ -463,23 +391,25 @@ class PRISMTrainer:
             content_batch = self.dataset.content_embeddings[batch_idx].to(self.device)
             collab_batch = self.dataset.collab_embeddings[batch_idx].to(self.device)
             with torch.no_grad():
-                latents = self.model.encode(content_batch, collab_batch)
+                enc_outputs = self.model.encode(content_batch, collab_batch)
+                latents = enc_outputs['z']
             latent_batches.append(latents.cpu())
-        
+
         if not latent_batches:
             self.logger.warning("Failed to collect latent samples for k-means initialization.")
             return
-        
+
         latents_cpu = torch.cat(latent_batches, dim=0)
         residual_cpu = latents_cpu.clone()
-        
+
         codebook_sizes = self.model.get_codebook_sizes()
         for layer_idx, quantizer in enumerate(quantizers):
             n_clusters = codebook_sizes[layer_idx]
             if residual_cpu.size(0) < n_clusters:
-                self.logger.warning(f"Layer {layer_idx+1}: insufficient samples for k-means ({residual_cpu.size(0)} < {n_clusters}).")
+                self.logger.warning(f"Layer {layer_idx+1}: insufficient samples for k-means "
+                                    f"({residual_cpu.size(0)} < {n_clusters}).")
                 break
-            
+
             try:
                 kmeans = KMeans(
                     n_clusters=n_clusters,
@@ -494,7 +424,7 @@ class PRISMTrainer:
             except Exception as exc:
                 self.logger.warning(f"K-means initialization failed at layer {layer_idx+1}: {exc}")
                 break
-            
+
             centroids = centroids_cpu.to(self.device)
             if getattr(quantizer, 'use_ema', False):
                 quantizer.embedding.data.copy_(centroids)
@@ -504,29 +434,23 @@ class PRISMTrainer:
                     quantizer.cluster_size.data.fill_(1.0)
             else:
                 quantizer.embedding.weight.data.copy_(centroids)
-            
+
             if hasattr(quantizer, '_initialized'):
                 quantizer._initialized.fill_(True)
-            
+
             assignments = torch.tensor(kmeans.labels_, dtype=torch.long)
             residual_cpu = residual_cpu - centroids_cpu[assignments]
             self.logger.info(
                 f"  Layer {layer_idx+1}: k-means initialized (inertia={kmeans.inertia_:.4f})"
             )
-        
+
         self.logger.info("Hierarchical k-means initialization completed.")
-    
+
     def validate(self) -> Dict[str, float]:
-        """
-        Validate model (currently same as train since no separate validation set).
-        Can be extended to use validation split.
-        """
-        # For now, just return train metrics
-        # TODO: Implement proper validation split
         return {}
-    
-    def save_checkpoint(self, epoch: int, metrics: Dict[str, float], is_best: bool = False, save_regular: bool = True):
-        """Save model checkpoint"""
+
+    def save_checkpoint(self, epoch: int, metrics: Dict[str, float], is_best: bool = False,
+                        save_regular: bool = True):
         checkpoint = {
             'epoch': epoch,
             'global_step': self.global_step,
@@ -536,58 +460,42 @@ class PRISMTrainer:
             'config': self.config,
             'best_loss': self.best_loss
         }
-        
+
         if self.scheduler is not None:
             checkpoint['scheduler_state_dict'] = self.scheduler.state_dict()
-        
-        # Save regular checkpoint (only when explicitly requested, e.g., every N epochs)
+
         if save_regular:
             checkpoint_path = self.output_dir / f'checkpoint_epoch{epoch}.pt'
             torch.save(checkpoint, checkpoint_path)
-            self.logger.info(f"✓ Checkpoint saved: {checkpoint_path}")
-        
-        # Save best checkpoint
+            self.logger.info(f"Checkpoint saved: {checkpoint_path}")
+
         if is_best:
             best_path = self.output_dir / 'best_model.pt'
             torch.save(checkpoint, best_path)
-            self.logger.info(f"✓ Best model saved: {best_path}")
-        
-        # Always save latest checkpoint (overwrite)
+            self.logger.info(f"Best model saved: {best_path}")
+
         latest_path = self.output_dir / 'latest_checkpoint.pt'
         torch.save(checkpoint, latest_path)
-    
+
     def load_checkpoint(self, checkpoint_path: str):
-        """Load model checkpoint"""
         self.logger.info(f"Loading checkpoint from {checkpoint_path}...")
-        
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
-        
         self.model.load_state_dict(checkpoint['model_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        
+
         if self.scheduler is not None and 'scheduler_state_dict' in checkpoint:
             self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-        
+
         self.current_epoch = checkpoint['epoch']
         self.global_step = checkpoint['global_step']
         self.best_loss = checkpoint['best_loss']
-        
-        self.logger.info(f"✓ Checkpoint loaded (epoch {self.current_epoch})")
-    
+        self.logger.info(f"Checkpoint loaded (epoch {self.current_epoch})")
+
     def save_item_codebook_mappings(self):
-        """
-        Save detailed item information including:
-        - Original item ID
-        - Codebook vectors for each layer
-        - Predicted tags for each layer
-        
-        Automatically called after training completion.
-        """
         self.logger.info("\n" + "=" * 80)
         self.logger.info("Saving Item-Codebook Mappings")
         self.logger.info("=" * 80)
-        
-        # Load best model
+
         best_model_path = self.output_dir / 'best_model.pt'
         if not best_model_path.exists():
             self.logger.warning(f"Best model not found at {best_model_path}, using current model")
@@ -595,35 +503,30 @@ class PRISMTrainer:
             self.logger.info(f"Loading best model from {best_model_path}")
             checkpoint = torch.load(best_model_path, map_location=self.device)
             self.model.load_state_dict(checkpoint['model_state_dict'])
-        
+
         self.model.eval()
-        
-        # Get codebooks from model
-        codebooks = self.model.get_codebooks()  # List of tensors [C1, C2, C3]
-        
-        # Collect data for all items
+        codebooks = self.model.get_codebooks()
+
         self.logger.info("Processing all items...")
         item_mappings = {}
-        
+
         with torch.no_grad():
             for batch in tqdm(self.train_loader, desc="Processing items"):
                 content_emb = batch['content_emb'].to(self.device)
                 collab_emb = batch['collab_emb'].to(self.device)
                 item_ids = batch['item_id'].cpu().numpy()
-                
-                # Forward pass to get codes and predictions
+
                 outputs = self.model(
                     content_emb=content_emb,
                     collab_emb=collab_emb,
-                    return_codes=True
+                    return_codes=True,
                 )
-                
-                encoding_indices = outputs['encoding_indices']
 
+                encoding_indices = outputs['encoding_indices']
                 batch_size = content_emb.size(0)
+
                 for i in range(batch_size):
                     item_id = str(item_ids[i])
-
                     item_indices = [indices[i].item() for indices in encoding_indices]
 
                     item_codebook_vectors = []
@@ -636,25 +539,18 @@ class PRISMTrainer:
                         'codebook_indices': item_indices,
                         'codebook_vectors': item_codebook_vectors,
                     }
-        
-        # Save to JSON file
+
         output_file = self.output_dir / 'item_codebook_mappings.json'
         with open(output_file, 'w') as f:
             json.dump(item_mappings, f, indent=2)
-        
-        self.logger.info(f"✓ Saved {len(item_mappings)} item mappings to: {output_file}")
-        
-        # Also save in a more compact numpy format for faster loading
+        self.logger.info(f"Saved {len(item_mappings)} item mappings to: {output_file}")
+
         npz_file = self.output_dir / 'item_codebook_mappings.npz'
-        
-        # Prepare numpy arrays
         n_items = len(item_mappings)
         n_layers = len(codebooks)
-        latent_dim = codebooks[0].size(1)
-        
+
         item_ids_array = np.array([int(k) for k in item_mappings.keys()])
         indices_array = np.array([item_mappings[str(iid)]['codebook_indices'] for iid in item_ids_array])
-        
         vectors_list = [item_mappings[str(iid)]['codebook_vectors'] for iid in item_ids_array]
         vectors_array = np.array(vectors_list)
 
@@ -664,24 +560,14 @@ class PRISMTrainer:
             codebook_indices=indices_array,
             codebook_vectors=vectors_array,
         )
-
-        self.logger.info(f"✓ Saved numpy format to: {npz_file}")
-        self.logger.info(f"  - item_ids: {item_ids_array.shape}")
-        self.logger.info(f"  - codebook_indices: {indices_array.shape}")
-        self.logger.info(f"  - codebook_vectors: {vectors_array.shape}")
-        
+        self.logger.info(f"Saved numpy format to: {npz_file}")
         self.logger.info("=" * 80)
-    
+
     def generate_semantic_ids_and_analyze(self):
-        """
-        Generate semantic IDs for all items and perform comprehensive analysis.
-        Automatically called after training completion.
-        """
         self.logger.info("\n" + "=" * 80)
         self.logger.info("Generating Semantic IDs and Analysis")
         self.logger.info("=" * 80)
-        
-        # Load best model
+
         best_model_path = self.output_dir / 'best_model.pt'
         if not best_model_path.exists():
             self.logger.warning(f"Best model not found at {best_model_path}, using current model")
@@ -689,14 +575,13 @@ class PRISMTrainer:
             self.logger.info(f"Loading best model from {best_model_path}")
             checkpoint = torch.load(best_model_path, map_location=self.device)
             self.model.load_state_dict(checkpoint['model_state_dict'])
-        
+
         self.model.eval()
-        
-        # Generate IDs
+
         self.logger.info("Generating semantic IDs for all items...")
         all_item_ids = []
         all_semantic_ids = []
-        
+
         with torch.no_grad():
             for batch in tqdm(self.train_loader, desc="Generating IDs"):
                 content_emb = batch['content_emb'].to(self.device)
@@ -710,109 +595,92 @@ class PRISMTrainer:
 
         all_item_ids = np.concatenate(all_item_ids, axis=0)
         all_semantic_ids = np.concatenate(all_semantic_ids, axis=0)
-        
         n_items = len(all_item_ids)
         n_layers = all_semantic_ids.shape[1]
-        
-        self.logger.info(f"✓ Generated {n_items} semantic IDs with {n_layers} layers")
-        
-        # Analyze
+
+        self.logger.info(f"Generated {n_items} semantic IDs with {n_layers} layers")
+
         self.logger.info("\n" + "-" * 80)
         self.logger.info("Semantic ID Analysis")
         self.logger.info("-" * 80)
-        
-        # 1. Overall uniqueness
+
         id_tuples = [tuple(sid) for sid in all_semantic_ids]
         unique_ids = set(id_tuples)
         n_unique = len(unique_ids)
         uniqueness_rate = n_unique / n_items
-        
+
         self.logger.info(f"\n1. Overall Uniqueness:")
         self.logger.info(f"   Total items: {n_items}")
         self.logger.info(f"   Unique IDs: {n_unique}")
         self.logger.info(f"   Uniqueness rate: {uniqueness_rate:.2%}")
-        
-        # 2. Collision analysis
+
         from collections import Counter
         id_counts = Counter(id_tuples)
         collisions = {k: v for k, v in id_counts.items() if v > 1}
         n_collision_groups = len(collisions)
         n_items_in_collisions = sum(collisions.values())
-        
+
         self.logger.info(f"\n2. Collision Analysis:")
         self.logger.info(f"   Collision groups: {n_collision_groups}")
         self.logger.info(f"   Items in collisions: {n_items_in_collisions} ({n_items_in_collisions/n_items:.2%})")
-        
+
         if n_collision_groups > 0:
-            # Show top collisions
             top_collisions = sorted(collisions.items(), key=lambda x: x[1], reverse=True)[:5]
             self.logger.info(f"   Top 5 collisions:")
             for sid, count in top_collisions:
                 self.logger.info(f"     ID {sid}: {count} items")
-        
-        # 3. Hierarchical overlap analysis (MOST IMPORTANT!)
+
         self.logger.info(f"\n3. Hierarchical Overlap Analysis:")
-        self.logger.info(f"   (Lower overlap rate = higher diversity)")
-        
         for layer in range(1, n_layers + 1):
-            # Get prefix up to this layer
             prefixes = [tuple(sid[:layer]) for sid in all_semantic_ids]
             unique_prefixes = set(prefixes)
             n_unique_prefix = len(unique_prefixes)
-            
-            # Overlap rate: how many items share the same prefix
             overlap_rate = 1.0 - (n_unique_prefix / n_items)
             avg_items_per_prefix = n_items / n_unique_prefix
-            
+
             self.logger.info(f"\n   Layer {layer} Prefix:")
             self.logger.info(f"     Unique prefixes: {n_unique_prefix} / {n_items}")
             self.logger.info(f"     Overlap rate: {overlap_rate:.4f}")
             self.logger.info(f"     Avg items per prefix: {avg_items_per_prefix:.2f}")
-            
-            # Show distribution
+
             prefix_counts = Counter(prefixes)
             singleton_count = sum(1 for count in prefix_counts.values() if count == 1)
             self.logger.info(f"     Singleton prefixes: {singleton_count} ({singleton_count/n_unique_prefix:.2%})")
-        
-        # 4. Codebook usage per layer
+
         self.logger.info(f"\n4. Codebook Usage per Layer:")
         codebook_sizes = self.model.get_codebook_sizes()
-        
         for layer in range(n_layers):
             codes = all_semantic_ids[:, layer]
             unique_codes = len(set(codes))
             n_embed = codebook_sizes[layer]
             usage_rate = unique_codes / n_embed
-            
-            # Most/least used
+
             code_counts = Counter(codes)
             most_common = code_counts.most_common(3)
             unused_codes = n_embed - unique_codes
-            
+
             self.logger.info(f"\n   Layer {layer + 1}:")
             self.logger.info(f"     Codebook size: {n_embed}")
             self.logger.info(f"     Used: {unique_codes} / {n_embed} ({usage_rate:.2%})")
             self.logger.info(f"     Unused: {unused_codes}")
             self.logger.info(f"     Most common codes: {[f'{code}({count})' for code, count in most_common]}")
-        
-        # 5. Save results in TIGER format (JSON)
+
+        # Save results
         semantic_id_mappings = {}
         for i in range(n_items):
             item_id = str(all_item_ids[i])
             semantic_codes = all_semantic_ids[i].tolist()
             semantic_id_mappings[item_id] = semantic_codes
-        
+
         output_file = self.output_dir / 'semantic_id_mappings.json'
         with open(output_file, 'w') as f:
             json.dump(semantic_id_mappings, f, indent=2)
-        self.logger.info(f"\n✓ Semantic ID mappings saved to: {output_file}")
-        
-        # Also save as numpy for faster loading
+        self.logger.info(f"\nSemantic ID mappings saved to: {output_file}")
+
         npy_file = self.output_dir / 'semantic_ids.npy'
         np.save(npy_file, all_semantic_ids)
-        self.logger.info(f"✓ Semantic IDs (numpy) saved to: {npy_file}")
-        
-        # Save detailed report
+        self.logger.info(f"Semantic IDs (numpy) saved to: {npy_file}")
+
         report = {
             'n_items': int(n_items),
             'n_layers': int(n_layers),
@@ -825,27 +693,23 @@ class PRISMTrainer:
             'hierarchical_overlap': {},
             'codebook_usage': {}
         }
-        
-        # Add hierarchical overlap
+
         for layer in range(1, n_layers + 1):
             prefixes = [tuple(sid[:layer]) for sid in all_semantic_ids]
             unique_prefixes = len(set(prefixes))
             overlap_rate = 1.0 - (unique_prefixes / n_items)
-            
             report['hierarchical_overlap'][f'layer_{layer}'] = {
                 'unique_prefixes': int(unique_prefixes),
                 'overlap_rate': float(overlap_rate),
                 'avg_items_per_prefix': float(n_items / unique_prefixes)
             }
-        
-        # Add codebook usage
+
         codebook_sizes = self.model.get_codebook_sizes()
         for layer in range(n_layers):
             codes = all_semantic_ids[:, layer]
             unique_codes = len(set(codes))
             n_embed = codebook_sizes[layer]
             usage_rate = unique_codes / n_embed
-            
             report['codebook_usage'][f'layer_{layer+1}'] = {
                 'codebook_size': int(n_embed),
                 'used': int(unique_codes),
@@ -853,213 +717,38 @@ class PRISMTrainer:
                 'usage_rate': float(usage_rate),
                 'unused': int(n_embed - unique_codes)
             }
-        
+
         report_file = self.output_dir / 'semantic_id_analysis.json'
         with open(report_file, 'w') as f:
             json.dump(report, f, indent=2)
-        
-        self.logger.info(f"✓ Analysis report saved to: {report_file}")
+        self.logger.info(f"Analysis report saved to: {report_file}")
         self.logger.info("=" * 80)
-        
-        # Auto-apply Sinkhorn algorithm to eliminate collisions
+
         self.apply_sinkhorn_reassignment()
-    
-    def analyze_gate_weights(self):
-        """
-        Analyze and visualize gate weights from trained model.
-        Automatically called after training completion if using gated fusion.
-        """
-        self.logger.info("\n" + "=" * 80)
-        self.logger.info("Analyzing Gate Weights")
-        self.logger.info("=" * 80)
-        
-        # Check if gated fusion is enabled
-        if not self.config.get('use_gated_fusion', True):
-            self.logger.info("Gated fusion not enabled, skipping gate analysis")
-            return
-        
-        # Load best model
-        best_model_path = self.output_dir / 'best_model.pt'
-        if not best_model_path.exists():
-            self.logger.warning(f"Best model not found at {best_model_path}, using current model")
-        else:
-            self.logger.info(f"Loading best model from {best_model_path}")
-            checkpoint = torch.load(best_model_path, map_location=self.device)
-            self.model.load_state_dict(checkpoint['model_state_dict'])
-        
-        self.model.eval()
-        
-        # Create output directory for gate analysis
-        gate_output_dir = self.output_dir / 'gate_analysis'
-        gate_output_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Collect gate statistics
-        self.logger.info("Collecting gate statistics...")
-        
-        all_gate_means = []
-        all_item_ids = []
-        
-        with torch.no_grad():
-            for batch in tqdm(self.train_loader, desc="Processing batches"):
-                collab_emb = batch['collab_emb'].to(self.device)
-                item_ids = batch['item_id'].cpu().numpy()
-                
-                # Get gate values
-                gate = self.model.encoder.gate_network(collab_emb)  # (B, 768)
-                mean_gate = gate.mean(dim=1).cpu().numpy()  # (B,)
-                
-                all_gate_means.append(mean_gate)
-                all_item_ids.append(item_ids)
-        
-        # Concatenate results
-        all_gate_means = np.concatenate(all_gate_means)
-        all_item_ids = np.concatenate(all_item_ids)
-        
-        self.logger.info(f"✓ Collected gate statistics for {len(all_gate_means)} items")
-        
-        # Compute statistics
-        self.logger.info("\n" + "-" * 80)
-        self.logger.info("Gate Statistics")
-        self.logger.info("-" * 80)
-        self.logger.info(f"Mean:   {all_gate_means.mean():.4f}")
-        self.logger.info(f"Median: {np.median(all_gate_means):.4f}")
-        self.logger.info(f"Std:    {all_gate_means.std():.4f}")
-        self.logger.info(f"Min:    {all_gate_means.min():.4f}")
-        self.logger.info(f"Max:    {all_gate_means.max():.4f}")
-        self.logger.info(f"Q25:    {np.percentile(all_gate_means, 25):.4f}")
-        self.logger.info(f"Q75:    {np.percentile(all_gate_means, 75):.4f}")
-        
-        # Categorize items
-        low_gate = (all_gate_means < 0.3).sum()
-        mid_gate = ((all_gate_means >= 0.3) & (all_gate_means <= 0.7)).sum()
-        high_gate = (all_gate_means > 0.7).sum()
-        
-        self.logger.info(f"\nGate Distribution:")
-        self.logger.info(f"  Low trust (< 0.3):  {low_gate:6d} ({low_gate/len(all_gate_means)*100:.1f}%)")
-        self.logger.info(f"  Medium (0.3-0.7):   {mid_gate:6d} ({mid_gate/len(all_gate_means)*100:.1f}%)")
-        self.logger.info(f"  High trust (> 0.7): {high_gate:6d} ({high_gate/len(all_gate_means)*100:.1f}%)")
-        
-        # Create visualizations
-        self.logger.info(f"\nCreating visualizations in {gate_output_dir}...")
-        
-        if MATPLOTLIB_AVAILABLE:
-            try:
-                # Plot 1: Histogram
-                plt.figure(figsize=(10, 6))
-                plt.hist(all_gate_means, bins=50, edgecolor='black', alpha=0.7)
-                plt.axvline(all_gate_means.mean(), color='red', linestyle='--', 
-                            label=f'Mean: {all_gate_means.mean():.3f}')
-                plt.axvline(np.median(all_gate_means), color='green', linestyle='--',
-                            label=f'Median: {np.median(all_gate_means):.3f}')
-                plt.xlabel('Mean Gate Value (Trust Score)')
-                plt.ylabel('Number of Items')
-                plt.title('Distribution of Gate Values Across Items')
-                plt.legend()
-                plt.grid(alpha=0.3)
-                plt.tight_layout()
-                plt.savefig(gate_output_dir / 'gate_distribution.png', dpi=150)
-                self.logger.info(f"  ✓ Saved: gate_distribution.png")
-                plt.close()
-                
-                # Plot 2: CDF
-                plt.figure(figsize=(10, 6))
-                sorted_gates = np.sort(all_gate_means)
-                cdf = np.arange(1, len(sorted_gates) + 1) / len(sorted_gates)
-                plt.plot(sorted_gates, cdf, linewidth=2)
-                plt.axhline(0.5, color='red', linestyle='--', alpha=0.5, label='50th percentile')
-                plt.axvline(0.3, color='orange', linestyle='--', alpha=0.5, label='Low trust threshold')
-                plt.axvline(0.7, color='green', linestyle='--', alpha=0.5, label='High trust threshold')
-                plt.xlabel('Mean Gate Value (Trust Score)')
-                plt.ylabel('Cumulative Probability')
-                plt.title('Cumulative Distribution of Gate Values')
-                plt.legend()
-                plt.grid(alpha=0.3)
-                plt.tight_layout()
-                plt.savefig(gate_output_dir / 'gate_cdf.png', dpi=150)
-                self.logger.info(f"  ✓ Saved: gate_cdf.png")
-                plt.close()
-                
-                # Plot 3: Box plot
-                plt.figure(figsize=(8, 6))
-                plt.boxplot(all_gate_means, vert=True)
-                plt.ylabel('Mean Gate Value (Trust Score)')
-                plt.title('Box Plot of Gate Values')
-                plt.grid(alpha=0.3)
-                plt.tight_layout()
-                plt.savefig(gate_output_dir / 'gate_boxplot.png', dpi=150)
-                self.logger.info(f"  ✓ Saved: gate_boxplot.png")
-                plt.close()
-                
-            except Exception as e:
-                self.logger.error(f"Error creating visualizations: {e}")
-        else:
-            self.logger.warning("matplotlib not available, skipping visualizations")
-        
-        # Save statistics to file
-        stats_file = gate_output_dir / 'gate_statistics.txt'
-        with open(stats_file, 'w') as f:
-            f.write("Gate Weight Statistics\n")
-            f.write("=" * 80 + "\n\n")
-            f.write(f"Total items: {len(all_gate_means)}\n\n")
-            f.write(f"Mean:   {all_gate_means.mean():.6f}\n")
-            f.write(f"Median: {np.median(all_gate_means):.6f}\n")
-            f.write(f"Std:    {all_gate_means.std():.6f}\n")
-            f.write(f"Min:    {all_gate_means.min():.6f}\n")
-            f.write(f"Max:    {all_gate_means.max():.6f}\n")
-            f.write(f"Q25:    {np.percentile(all_gate_means, 25):.6f}\n")
-            f.write(f"Q75:    {np.percentile(all_gate_means, 75):.6f}\n\n")
-            f.write("Gate Distribution:\n")
-            f.write(f"  Low trust (< 0.3):  {low_gate:6d} ({low_gate/len(all_gate_means)*100:.2f}%)\n")
-            f.write(f"  Medium (0.3-0.7):   {mid_gate:6d} ({mid_gate/len(all_gate_means)*100:.2f}%)\n")
-            f.write(f"  High trust (> 0.7): {high_gate:6d} ({high_gate/len(all_gate_means)*100:.2f}%)\n")
-        
-        self.logger.info(f"  ✓ Saved: gate_statistics.txt")
-        
-        # Save gate values for each item (for further analysis)
-        gate_data_file = gate_output_dir / 'gate_values.npz'
-        np.savez(
-            gate_data_file,
-            item_ids=all_item_ids,
-            gate_means=all_gate_means
-        )
-        self.logger.info(f"  ✓ Saved: gate_values.npz")
-        
-        self.logger.info("\n" + "=" * 80)
-        self.logger.info("✓ Gate analysis completed!")
-        self.logger.info(f"Output directory: {gate_output_dir}")
-        self.logger.info("=" * 80)
-    
+
     def apply_sinkhorn_reassignment(self):
-        """
-        Automatically apply Sinkhorn algorithm to eliminate ID collisions.
-        Called after semantic ID generation.
-        """
         self.logger.info("\n" + "=" * 80)
         self.logger.info("Applying Sinkhorn Algorithm for Collision Elimination")
         self.logger.info("=" * 80)
-        
-        # Check if semantic_id_mappings.json exists
+
         semantic_ids_file = self.output_dir / 'semantic_id_mappings.json'
         if not semantic_ids_file.exists():
             self.logger.warning(f"Semantic IDs file not found: {semantic_ids_file}")
             self.logger.warning("Skipping Sinkhorn reassignment")
             return
-        
-        # Backup original file
+
         original_backup = self.output_dir / 'semantic_id_mappings_original.json'
         if not original_backup.exists():
             import shutil
             shutil.copy2(semantic_ids_file, original_backup)
-            self.logger.info(f"  ✓ Backed up original IDs to: {original_backup}")
-        
-        # Import Sinkhorn reassigner
+            self.logger.info(f"  Backed up original IDs to: {original_backup}")
+
         try:
             from sinkhorn_reassignment import SinkhornIDReassigner
         except ImportError:
             self.logger.error("Cannot import SinkhornIDReassigner, skipping reassignment")
             return
-        
-        # Initialize reassigner
+
         try:
             reassigner = SinkhornIDReassigner(
                 semantic_ids_path=str(semantic_ids_file),
@@ -1068,265 +757,217 @@ class PRISMTrainer:
                 device=self.config.get('device', 'cuda'),
                 output_dir=str(self.output_dir)
             )
-            
-            # Run reassignment with variable codebook sizes
+
             codebook_sizes = self.model.get_codebook_sizes()
             new_semantic_ids = reassigner.run(codebook_sizes=codebook_sizes, max_iterations=10)
-            
-            # Verify final uniqueness
+
             from collections import Counter
             id_tuples = [tuple(sid) for sid in new_semantic_ids]
             n_unique = len(set(id_tuples))
-            uniqueness_rate = n_unique / len(id_tuples)
-            
+
             if n_unique == len(new_semantic_ids):
                 self.logger.info("\n" + "=" * 80)
-                self.logger.info("✅ SUCCESS: 100% uniqueness achieved after Sinkhorn reassignment!")
+                self.logger.info("SUCCESS: 100% uniqueness achieved after Sinkhorn reassignment!")
                 self.logger.info("=" * 80)
             else:
-                self.logger.warning(f"\n⚠️  Warning: {len(new_semantic_ids) - n_unique} collisions still remain")
-                self.logger.warning(f"   Final uniqueness: {uniqueness_rate:.2%}")
-            
+                self.logger.warning(f"\nWarning: {len(new_semantic_ids) - n_unique} collisions still remain")
+                self.logger.warning(f"   Final uniqueness: {n_unique / len(id_tuples):.2%}")
+
         except Exception as e:
             self.logger.error(f"Error during Sinkhorn reassignment: {e}")
             import traceback
             self.logger.error(traceback.format_exc())
             self.logger.warning("Continuing without Sinkhorn reassignment")
-    
+
     def train(self):
-        """Main training loop"""
         self.logger.info("=" * 80)
         self.logger.info("Starting PRISM training")
         self.logger.info("=" * 80)
-        
+
         start_epoch = self.current_epoch + 1
         end_epoch = self.config['epochs']
-        
+
         for epoch in range(start_epoch, end_epoch + 1):
             self.current_epoch = epoch
-            
-            # Train epoch
             train_metrics = self.train_epoch(epoch)
-            
-            # Log metrics
+
             self.logger.info(f"\nEpoch {epoch} Summary:")
             self.logger.info(f"  Total Loss: {train_metrics['total_loss']:.4f}")
-
-            if self.config.get('use_dual_decoder', True):
-                self.logger.info(f"  Recon Loss: {train_metrics['recon_total']:.4f} "
-                               f"(content: {train_metrics['recon_content']:.4f}, "
-                               f"collab: {train_metrics['recon_collab']:.4f})")
-            else:
-                self.logger.info(f"  Recon Loss: {train_metrics['recon_total']:.4f} "
-                               f"(concat: {train_metrics.get('recon_concat', train_metrics['recon_total']):.4f})")
-                self.logger.info(f"    [Monitor only - content: {train_metrics['recon_content']:.4f}, "
-                               f"collab: {train_metrics['recon_collab']:.4f}]")
+            self.logger.info(f"  UPR Loss: {train_metrics['upr']:.4f}")
 
             for i in range(self.config['n_layers']):
                 if f'perplexity_layer{i+1}' in train_metrics:
                     self.logger.info(f"  Perplexity Layer {i+1}: {train_metrics[f'perplexity_layer{i+1}']:.2f}")
 
-            if 'gate_mean' in train_metrics:
+            if 'consistency_mean' in train_metrics:
                 self.logger.info(
-                    f"  Gate Stats: "
-                    f"mean={train_metrics['gate_mean']:.3f}, "
-                    f"median={train_metrics['gate_median']:.3f}, "
-                    f"range=[{train_metrics['gate_min']:.3f}, {train_metrics['gate_max']:.3f}]"
+                    f"  MCD Consistency: "
+                    f"mean={train_metrics['consistency_mean']:.3f}, "
+                    f"std={train_metrics['consistency_std']:.3f}, "
+                    f"range=[{train_metrics['consistency_min']:.3f}, {train_metrics['consistency_max']:.3f}]"
                 )
 
-            if 'gate_supervision' in train_metrics:
-                self.logger.info(
-                    f"  Gate Supervision: "
-                    f"loss={train_metrics['gate_supervision']:.4f}, "
-                    f"diversity={train_metrics.get('gate_diversity', 0):.4f}, "
-                    f"variance={train_metrics.get('gate_variance', 0):.4f}, "
-                    f"std={train_metrics.get('gate_std', 0):.3f}"
-                )
+            if 'saco' in train_metrics:
+                self.logger.info(f"  SACO Loss: {train_metrics['saco']:.4f}")
 
-            # Track history
             for key, value in train_metrics.items():
                 self.train_history[key].append(value)
-            
-            # Check for improvement
+
             should_stop, primary_improved = self._update_early_stopping(train_metrics, epoch)
             if primary_improved:
-                self.logger.info(f"  ✓ New best loss: {self.best_loss:.4f}")
+                self.logger.info(f"  New best loss: {self.best_loss:.4f}")
             else:
                 self.logger.info(
                     f"  Patience: {self.patience_counter}/"
                     f"{self.config.get('early_stop_patience', float('inf'))}"
                 )
-            
-            # Save checkpoint
+
             should_save_regular = (epoch % self.config.get('save_every', 50) == 0)
             if should_save_regular or primary_improved:
                 self.save_checkpoint(epoch, train_metrics, primary_improved, save_regular=should_save_regular)
-            
-            # Early stopping
+
             if should_stop:
                 self.logger.info(f"\nEarly stopping triggered at epoch {epoch}")
                 break
-        
-        # Final save (always save as regular checkpoint)
+
         self.save_checkpoint(epoch, train_metrics, is_best=False, save_regular=True)
-        
-        # Save training history
+
         history_path = self.output_dir / 'training_history.json'
         with open(history_path, 'w') as f:
             json.dump(self.train_history, f, indent=2)
-        
+
         self.logger.info("=" * 80)
         self.logger.info("Training completed!")
         self.logger.info(f"Best loss: {self.best_loss:.4f}")
         self.logger.info(f"Output directory: {self.output_dir}")
         self.logger.info("=" * 80)
-        
-        # Auto-analyze gate weights if using gated fusion
-        if self.config.get('use_gated_fusion', True):
-            self.analyze_gate_weights()
-        
-        # Save item-codebook mappings (NEW FEATURE)
+
         self.save_item_codebook_mappings()
-        
-        # Auto-generate semantic IDs and analysis
         self.generate_semantic_ids_and_analyze()
 
 
 def parse_args():
-    """Parse command line arguments"""
-    parser = argparse.ArgumentParser(description='Train PRISM')
-    
+    parser = argparse.ArgumentParser(description='Train PRISM with IDE + MCD + SACO')
+
     # Data arguments
     parser.add_argument('--data_path', type=str, required=True,
-                       help='Path to dataset directory')
+                        help='Path to dataset directory')
     parser.add_argument('--output_dir', type=str, required=True,
-                       help='Output directory for checkpoints and logs')
+                        help='Output directory for checkpoints and logs')
     parser.add_argument('--max_items', type=int, default=None,
-                       help='Maximum number of items (for testing)')
-    
+                        help='Maximum number of items (for testing)')
+
     # Model arguments
     parser.add_argument('--n_layers', type=int, default=3,
-                       help='Number of RQ layers')
+                        help='Number of RQ layers')
     parser.add_argument('--n_embed', type=int, default=256,
-                       help='Default codebook size per layer (used if n_embed_per_layer not specified)')
+                        help='Default codebook size per layer')
     parser.add_argument('--n_embed_per_layer', type=str, default=None,
-                       help='Variable codebook sizes per layer (comma-separated, e.g., "128,256,512")')
+                        help='Variable codebook sizes per layer (comma-separated)')
     parser.add_argument('--latent_dim', type=int, default=32,
-                       help='Latent/codebook dimension')
+                        help='Latent/codebook dimension')
     parser.add_argument('--content_dim', type=int, default=768,
-                       help='Content embedding dimension')
+                        help='Content embedding dimension')
     parser.add_argument('--collab_dim', type=int, default=64,
-                       help='Collaborative embedding dimension')
-    parser.add_argument('--no_gated_fusion', action='store_true',
-                       help='Disable gated additive fusion (use simple concatenation instead)')
-    parser.add_argument('--no_dual_decoder', action='store_true',
-                       help='Disable dual decoder heads (use single decoder for concatenated embedding instead)')
-    
+                        help='Collaborative embedding dimension')
+    # IDE + MCD arguments
+    parser.add_argument('--ide', type=str, default='on', choices=['on', 'off'],
+                        help='Enable/disable IDE (default: on). Ablation: --ide off')
+    parser.add_argument('--mcd', type=str, default='on', choices=['on', 'off'],
+                        help='Enable/disable MCD (default: on). Ablation: --mcd off')
+    parser.add_argument('--ide_dim', type=int, default=128,
+                        help='IDE projection dimension d (default: 128)')
+
+    # SACO arguments
+    parser.add_argument('--use_saco', action='store_true',
+                        help='Enable Sequence-Aware Contrastive Objective')
+    parser.add_argument('--lambda_sac', type=float, default=0.1,
+                        help='Weight for SACO loss')
+    parser.add_argument('--saco_temperature', type=float, default=0.07,
+                        help='Temperature for SACO contrastive loss')
+
     # Training arguments
     parser.add_argument('--epochs', type=int, default=500,
-                       help='Number of training epochs')
+                        help='Number of training epochs')
     parser.add_argument('--batch_size', type=int, default=256,
-                       help='Batch size')
+                        help='Batch size')
     parser.add_argument('--learning_rate', type=float, default=1e-3,
-                       help='Learning rate')
+                        help='Learning rate')
     parser.add_argument('--weight_decay', type=float, default=0.0,
-                       help='Weight decay')
+                        help='Weight decay')
     parser.add_argument('--grad_clip', type=float, default=1.0,
-                       help='Gradient clipping norm')
-    
+                        help='Gradient clipping norm')
+
     # Loss weights
-    parser.add_argument('--lambda_content', type=float, default=1.0,
-                       help='Weight for content reconstruction')
-    parser.add_argument('--lambda_collab', type=float, default=1.0,
-                       help='Weight for collaborative reconstruction')
     parser.add_argument('--beta', type=float, default=0.25,
-                       help='Commitment loss weight')
-    
+                        help='Commitment loss weight')
+
     # Quantization arguments
     parser.add_argument('--use_ema', action='store_true',
-                       help='Use EMA for codebook updates')
+                        help='Use EMA for codebook updates')
     parser.add_argument('--ema_decay', type=float, default=0.99,
-                       help='EMA decay rate')
+                        help='EMA decay rate')
     parser.add_argument('--quantize_mode', type=str, default='rotation',
-                       choices=['ste', 'rotation', 'gumbel_softmax'],
-                       help='Quantization mode')
-    
-    # Gate supervision arguments
-    parser.add_argument('--use_gate_supervision', action='store_true',
-                       help='Use popularity-based gate supervision to improve gate diversity')
-    parser.add_argument('--gate_supervision_weight', type=float, default=0.1,
-                       help='Weight for gate supervision loss')
-    parser.add_argument('--gate_diversity_weight', type=float, default=0.5,
-                       help='Weight for gate diversity regularization')
-    parser.add_argument('--gate_target_std', type=float, default=0.2,
-                       help='Target standard deviation for gate values')
-    
+                        choices=['ste', 'rotation', 'gumbel_softmax'],
+                        help='Quantization mode')
+
     # Scheduler arguments
     parser.add_argument('--use_scheduler', action='store_true',
-                       help='Use learning rate scheduler')
+                        help='Use learning rate scheduler')
     parser.add_argument('--scheduler_type', type=str, default='warmup_cosine',
-                       choices=['warmup_cosine', 'exponential'],
-                       help='Scheduler type')
+                        choices=['warmup_cosine', 'exponential'],
+                        help='Scheduler type')
     parser.add_argument('--warmup_ratio', type=float, default=0.1,
-                       help='Warmup ratio')
-    
+                        help='Warmup ratio')
+
     # Early stopping
     parser.add_argument('--early_stop_patience', type=int, default=200,
-                       help='Early stopping patience')
+                        help='Early stopping patience')
     parser.add_argument('--early_stop_min_delta', type=float, default=1e-4,
-                       help='Minimum delta for early stopping')
-    
-    # Other arguments
-    parser.add_argument('--save_every', type=int, default=50,
-                       help='Save checkpoint every N epochs')
-    parser.add_argument('--device', type=str, default='cuda',
-                       choices=['cuda', 'cpu'],
-                       help='Device to use')
-    parser.add_argument('--num_workers', type=int, default=4,
-                       help='Number of data loading workers')
-    parser.add_argument('--log_level', type=str, default='INFO',
-                       choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
-                       help='Logging level')
-    parser.add_argument('--resume', type=str, default=None,
-                       help='Resume from checkpoint')
-    
-    # Early stopping and perplexity guard
+                        help='Minimum delta for early stopping')
     parser.add_argument('--early_stop_cooldown', type=int, default=3,
-                       help='Extra epochs after warmup before early stopping can trigger')
+                        help='Extra epochs after warmup before early stopping can trigger')
     parser.add_argument('--early_stop_warmup_epochs', type=int, default=5,
-                       help='Epochs to wait before early stopping can trigger')
+                        help='Epochs to wait before early stopping can trigger')
     parser.add_argument('--perplexity_collapse_patience', type=int, default=3,
-                       help='Number of consecutive low-perplexity epochs before intervention')
+                        help='Number of consecutive low-perplexity epochs before intervention')
     parser.add_argument('--perplexity_collapse_ratio', type=float, default=0.35,
-                       help='Minimum acceptable perplexity ratio before triggering collapse guard')
-    
+                        help='Minimum acceptable perplexity ratio before triggering collapse guard')
+
     # Hierarchical k-means initialization arguments
     parser.add_argument('--no_hierarchical_kmeans_init', action='store_true',
-                       help='Disable hierarchical k-means codebook initialization')
+                        help='Disable hierarchical k-means codebook initialization')
     parser.add_argument('--kmeans_init_samples', type=int, default=8192,
-                       help='Number of items to sample for k-means initialization')
+                        help='Number of items to sample for k-means initialization')
     parser.add_argument('--kmeans_batch_size', type=int, default=1024,
-                       help='Batch size when encoding samples for k-means')
+                        help='Batch size when encoding samples for k-means')
     parser.add_argument('--kmeans_random_state', type=int, default=42,
-                       help='Random seed for k-means clustering')
-    
+                        help='Random seed for k-means clustering')
+
+    # Other arguments
+    parser.add_argument('--save_every', type=int, default=50,
+                        help='Save checkpoint every N epochs')
+    parser.add_argument('--device', type=str, default='cuda',
+                        choices=['cuda', 'cpu'],
+                        help='Device to use')
+    parser.add_argument('--num_workers', type=int, default=4,
+                        help='Number of data loading workers')
+    parser.add_argument('--log_level', type=str, default='INFO',
+                        choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
+                        help='Logging level')
+    parser.add_argument('--resume', type=str, default=None,
+                        help='Resume from checkpoint')
+
     return parser.parse_args()
 
 
 def main():
-    """Main entry point"""
     args = parse_args()
-    
-    # Convert args to config dict
     config = vars(args)
-    
-    # Set use_gated_fusion (default True unless --no_gated_fusion is specified)
-    config['use_gated_fusion'] = not args.no_gated_fusion
-    
-    # Set use_dual_decoder (default True unless --no_dual_decoder is specified)
-    config['use_dual_decoder'] = not args.no_dual_decoder
-    
-    # Parse n_embed_per_layer if provided
+
+    config['use_ide'] = (args.ide == 'on')
+    config['use_mcd'] = (args.mcd == 'on')
+
     if args.n_embed_per_layer is not None:
         try:
             n_embed_per_layer = [int(x.strip()) for x in args.n_embed_per_layer.split(',')]
@@ -1343,18 +984,14 @@ def main():
             config['n_embed_per_layer'] = None
     else:
         config['n_embed_per_layer'] = None
-    
-    # Initialize trainer
+
     trainer = PRISMTrainer(config)
-    
-    # Resume from checkpoint if specified
+
     if args.resume:
         trainer.load_checkpoint(args.resume)
-    
-    # Start training
+
     trainer.train()
 
 
 if __name__ == '__main__':
     main()
-

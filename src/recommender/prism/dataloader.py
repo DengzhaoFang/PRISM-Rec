@@ -49,35 +49,15 @@ def collate_fn(batch: List[Dict], pad_token_id: int = 0, use_dynamic_batching: b
         'attention_mask': attention_mask
     }
     
-    # Add multi-modal data if present in batch
-    if 'history_codebook_vecs' in batch[0]:
-        result['history_codebook_vecs'] = torch.stack([
-            torch.from_numpy(item['history_codebook_vecs']) for item in batch
+    # Add purified DSI features if present
+    if 'history_purified_content' in batch[0]:
+        result['history_purified_content'] = torch.stack([
+            torch.from_numpy(item['history_purified_content']) for item in batch
         ])
-    
-    if 'target_codebook_vecs' in batch[0]:
-        result['target_codebook_vecs'] = torch.stack([
-            torch.from_numpy(item['target_codebook_vecs']) for item in batch
-        ])
-    
-    if 'history_content_embs' in batch[0]:
-        result['history_content_embs'] = torch.stack([
-            torch.from_numpy(item['history_content_embs']) for item in batch
-        ])
-    
-    if 'target_content_emb' in batch[0]:
-        result['target_content_emb'] = torch.stack([
-            torch.from_numpy(item['target_content_emb']) for item in batch
-        ])
-    
-    if 'history_collab_embs' in batch[0]:
-        result['history_collab_embs'] = torch.stack([
-            torch.from_numpy(item['history_collab_embs']) for item in batch
-        ])
-    
-    if 'target_collab_emb' in batch[0]:
-        result['target_collab_emb'] = torch.stack([
-            torch.from_numpy(item['target_collab_emb']) for item in batch
+
+    if 'history_purified_collab' in batch[0]:
+        result['history_purified_collab'] = torch.stack([
+            torch.from_numpy(item['history_purified_collab']) for item in batch
         ])
     
     if 'history_item_ids' in batch[0]:

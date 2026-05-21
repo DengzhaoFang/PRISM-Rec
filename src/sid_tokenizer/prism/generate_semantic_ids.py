@@ -277,11 +277,11 @@ class SemanticIDGenerator:
             least_used = [i for i in range(n_embed) if i not in code_counts]
             
             usage_stats[f'layer_{layer+1}'] = {
-                'n_used': n_used,
-                'n_unused': n_embed - n_used,
-                'usage_rate': usage_rate,
-                'most_common': most_common,
-                'n_least_used': len(least_used)
+                'n_used': int(n_used),
+                'n_unused': int(n_embed - n_used),
+                'usage_rate': float(usage_rate),
+                'most_common': [(int(k), int(v)) for k, v in most_common],
+                'n_least_used': int(len(least_used))
             }
             
             self.logger.info(f"  Layer {layer+1}:")
@@ -390,6 +390,59 @@ class SemanticIDGenerator:
         
         return results, stats
 
+    def export_purified_embeddings(self, batch_size: int = 512):
+        """Export MCD-purified features for Stage 2 DSI fusion.
+
+        Saves h_t_hat (purified_content, 128D) and h_c_hat (purified_collab, 128D)
+        as separate .npy arrays indexed by item_id. These replace raw 768D content
+        and 64D collab embeddings in Stage 2.
+        """
+        self.logger.info("=" * 80)
+        self.logger.info("Exporting Purified Embeddings (h_t_hat + h_c_hat) for Stage 2")
+        self.logger.info("=" * 80)
+
+        dataloader = torch.utils.data.DataLoader(
+            self.dataset, batch_size=batch_size, shuffle=False, num_workers=4
+        )
+
+        n_items = len(self.dataset)
+        ide_dim = self.config.get('ide_dim', 128)
+
+        purified_content = np.zeros((n_items, ide_dim), dtype=np.float32)
+        purified_collab = np.zeros((n_items, ide_dim), dtype=np.float32)
+        item_ids_out = np.zeros(n_items, dtype=np.int64)
+
+        self.model.eval()
+        idx = 0
+        with torch.no_grad():
+            for batch in tqdm(dataloader, desc="Extracting purified features"):
+                content_emb = batch['content_emb'].to(self.device)
+                collab_emb = batch['collab_emb'].to(self.device)
+                item_ids = batch['item_id'].cpu().numpy()
+
+                enc_outputs = self.model.encode(content_emb, collab_emb)
+                h_t_hat = enc_outputs['h_t_hat'].cpu().numpy()
+                h_c_hat = enc_outputs['h_c_hat'].cpu().numpy()
+
+                b = len(item_ids)
+                purified_content[idx:idx + b] = h_t_hat
+                purified_collab[idx:idx + b] = h_c_hat
+                item_ids_out[idx:idx + b] = item_ids
+                idx += b
+
+        content_path = self.output_dir / 'item_purified_content.npy'
+        collab_path = self.output_dir / 'item_purified_collab.npy'
+        ids_path = self.output_dir / 'item_purified_ids.npy'
+
+        np.save(content_path, purified_content)
+        np.save(collab_path, purified_collab)
+        np.save(ids_path, item_ids_out)
+
+        self.logger.info(f"Purified content ({ide_dim}D): {content_path} ({n_items} items)")
+        self.logger.info(f"Purified collab ({ide_dim}D): {collab_path} ({n_items} items)")
+        self.logger.info(f"Item IDs: {ids_path}")
+        self.logger.info("=" * 80)
+
 
 def parse_args():
     """Parse command line arguments"""
@@ -408,7 +461,9 @@ def parse_args():
                        help='Device to use')
     parser.add_argument('--batch_size', type=int, default=512,
                        help='Batch size for ID generation')
-    
+    parser.add_argument('--save_purified_embeddings', action='store_true',
+                       help='Export MCD-purified h_t_hat(128D) and h_c_hat(128D) for Stage 2 DSI')
+
     return parser.parse_args()
 
 
@@ -426,6 +481,9 @@ def main():
     
     # Generate and analyze
     generator.generate_and_analyze()
+
+    if args.save_purified_embeddings:
+        generator.export_purified_embeddings()
 
 
 if __name__ == '__main__':

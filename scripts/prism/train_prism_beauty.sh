@@ -1,16 +1,28 @@
 #!/bin/bash
 
-# PRISM Training Script (without HSA modules)
+# PRISM Training Script with IDE + MCD + UPR + SACO
 #
-# Removed: Tag Anchoring Loss, Codebook Balance Loss, Hierarchical Classification Loss
-# Kept: Reconstruction Loss + Commitment Loss + Gate Supervision
+# Pipeline: IDE -> MCD -> z_clean(256D) -> Encoder -> RQ-VAE -> UnifiedDecoder -> z_dec(256D)
+# Loss: L_UPR + beta * L_commit + lambda_sac * L_SACO
+#   UPR = MSE(z_dec, z_clean.detach())   -- inward: local fidelity
+#   SACO                                  -- outward: global co-occurrence structure
+#
+# Ablation guide:
+#   --ide off          disable IDE, revert to raw 768D+64D input
+#   --mcd off          disable MCD, skip cross-modal denoising
+#   remove --use_saco  disable SACO contrastive loss
+#
+# Key hyperparameters:
+#   --ide_dim 128            IDE projection dimension d (z_clean = 2*d = 256D)
+#   --lambda_sac 0.1         SACO loss weight
+#   --saco_temperature 0.07  SACO softmax temperature
 
 
 cd ../../src/sid_tokenizer/prism
 
 python train_prism.py \
     --data_path ../../../dataset/Amazon-Beauty/processed/beauty-tiger-sentenceT5base/Beauty \
-    --output_dir ../../../scripts/output/prism_tokenizer/beauty/3-256-32-ema-only-5-core-items \
+    --output_dir ../../../scripts/output/prism_tokenizer/beauty/3-256-32-ide-mcd-saco \
     \
     --n_layers 3 \
     --n_embed_per_layer "256,256,256" \
@@ -24,8 +36,6 @@ python train_prism.py \
     --weight_decay 1e-4 \
     --grad_clip 1.0 \
     \
-    --lambda_content 1.0 \
-    --lambda_collab 2.0 \
     --beta 0.25 \
     \
     --use_ema \
@@ -44,7 +54,9 @@ python train_prism.py \
     --num_workers 4 \
     --log_level INFO \
     \
-    --use_gate_supervision \
-    --gate_supervision_weight 0.8 \
-    --gate_diversity_weight 3.5 \
-    --gate_target_std 0.3
+    --ide on \
+    --ide_dim 128 \
+    --mcd on \
+    --use_saco \
+    --lambda_sac 0.1 \
+    --saco_temperature 0.07
