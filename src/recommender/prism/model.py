@@ -21,14 +21,38 @@ from .adaptive_temperature import AdaptiveTemperatureScaler, TemperatureScaledCr
 logger = logging.getLogger(__name__)
 
 
+class PurifiedSemanticPredictor(nn.Module):
+    """Predict target item's z_clean (256D) from decoder hidden states.
+
+    Auxiliary MSE regularization: the decoder's internal representation
+    of the generated semantic codes must be predictive of the item's
+    underlying purified multimodal features, encouraging semantic grounding.
+    """
+
+    def __init__(self, d_model: int = 128, purified_dim: int = 256, hidden_dim: int = 256, dropout: float = 0.1):
+        super().__init__()
+        self.predictor = nn.Sequential(
+            nn.Linear(d_model, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, purified_dim),
+        )
+
+    def forward(self, decoder_hidden: torch.Tensor) -> torch.Tensor:
+        """decoder_hidden: (B, num_code_tokens, d_model) last-layer decoder states."""
+        pooled = decoder_hidden.mean(dim=1)  # (B, d_model)
+        return self.predictor(pooled)
+
+
 class MultiSourceFusion(nn.Module):
     """
-    3-way equal-dimensional fusion for DSI.
+    3-way purified fusion for DSI.
 
     Sources:
-      - id_emb:        (B, L, d_model)  sequence structure
-      - purified_content: (B, L, 128)     MCD-denoised semantics  (h_t_hat)
-      - purified_collab:  (B, L, 128)     MCD-denoised behavior   (h_c_hat)
+      - id_emb:            (B, L, d_model)   sequence structure
+      - purified_content:  (B, L, 128)       MCD-denoised semantics
+      - purified_collab:   (B, L, 128)       MCD-denoised behavior
 
     All projected to d_model, fused via learned/attention/fixed gating.
     """
@@ -47,21 +71,19 @@ class MultiSourceFusion(nn.Module):
         self.gate_type = gate_type
         self.use_residual = use_residual
 
-        # Project both purified modalities to d_model
         self.content_proj = nn.Linear(purified_dim, d_model)
         self.collab_proj = nn.Linear(purified_dim, d_model)
         nn.init.xavier_uniform_(self.content_proj.weight, gain=0.5)
         nn.init.zeros_(self.content_proj.bias)
         nn.init.xavier_uniform_(self.collab_proj.weight, gain=0.5)
         nn.init.zeros_(self.collab_proj.bias)
-
         self.content_norm = nn.LayerNorm(d_model)
         self.collab_norm = nn.LayerNorm(d_model)
 
         self.dropout = nn.Dropout(dropout)
 
         if use_residual:
-            self.fusion_alpha = nn.Parameter(torch.tensor(-2.0))  # sigmoid(-2.0) ≈ 0.12
+            self.fusion_alpha = nn.Parameter(torch.tensor(-2.0))
 
         if gate_type == "learned":
             self.gate_fc1 = nn.Linear(d_model * 3, d_model)
@@ -69,9 +91,9 @@ class MultiSourceFusion(nn.Module):
             nn.init.xavier_uniform_(self.gate_fc1.weight, gain=0.5)
             nn.init.zeros_(self.gate_fc1.bias)
             nn.init.xavier_uniform_(self.gate_fc2.weight, gain=0.5)
-            self.gate_fc2.bias.data[0] = 1.0   # favor ID
-            self.gate_fc2.bias.data[1] = 0.0   # allow content
-            self.gate_fc2.bias.data[2] = 0.0   # allow collab
+            self.gate_fc2.bias.data[0] = 1.0
+            self.gate_fc2.bias.data[1] = 0.0
+            self.gate_fc2.bias.data[2] = 0.0
             self.gate_dropout = nn.Dropout(dropout)
         elif gate_type == "attention":
             self.query_proj = nn.Linear(d_model, d_model)
@@ -100,9 +122,8 @@ class MultiSourceFusion(nn.Module):
             concat = torch.cat([id_emb, content_proj, collab_proj], dim=-1)
             gate_hidden = F.relu(self.gate_fc1(concat))
             gate_hidden = self.gate_dropout(gate_hidden)
-            gates = torch.sigmoid(self.gate_fc2(gate_hidden))  # (B, L, 3)
-            fused = (gates[..., 0:1] * id_emb +
-                     gates[..., 1:2] * content_proj +
+            gates = torch.sigmoid(self.gate_fc2(gate_hidden))
+            fused = (gates[..., 0:1] * id_emb + gates[..., 1:2] * content_proj +
                      gates[..., 2:3] * collab_proj)
         elif self.gate_type == "attention":
             sources = torch.stack([id_emb, content_proj, collab_proj], dim=2)
@@ -110,13 +131,12 @@ class MultiSourceFusion(nn.Module):
             key = self.key_proj(sources)
             value = self.value_proj(sources)
             scores = torch.matmul(query, key.transpose(-2, -1)) / (self.d_model ** 0.5)
-            gates = torch.sigmoid(scores)
-            fused = torch.matmul(gates, value).squeeze(2)
+            fused = torch.matmul(torch.sigmoid(scores), value).squeeze(2)
         elif self.gate_type == "fixed":
             w = self.fixed_weights.view(1, 1, 3)
-            fused = w[..., 0] * id_emb + w[..., 1] * content_proj + w[..., 2] * collab_proj
+            fused = w[..., 0]*id_emb + w[..., 1]*content_proj + w[..., 2]*collab_proj
         else:
-            fused = id_emb + content_proj + collab_proj  # simple sum fallback
+            fused = id_emb + content_proj + collab_proj
 
         if self.use_residual and hasattr(self, 'fusion_alpha'):
             alpha = torch.sigmoid(self.fusion_alpha)
@@ -233,12 +253,13 @@ class TIGER(nn.Module):
             fusion_gate_type = training_config.fusion_gate_type
             purified_dim = getattr(training_config, 'purified_dim', 128)
 
-            if fusion_gate_type == "moe":
+            if fusion_gate_type in ("moe", "dense"):
                 num_experts = getattr(training_config, 'moe_num_experts', 3)
                 expert_hidden_dim = getattr(training_config, 'moe_expert_hidden_dim', 256)
                 top_k = getattr(training_config, 'moe_top_k', 2)
                 use_load_balancing = getattr(training_config, 'moe_use_load_balancing', False)
                 load_balance_weight = getattr(training_config, 'moe_load_balance_weight', 0.001)
+                router_type = "dense" if fusion_gate_type == "dense" else "sparse"
 
                 self.fusion_module = MoEFusion(
                     d_model=model_config.d_model,
@@ -250,8 +271,10 @@ class TIGER(nn.Module):
                     load_balance_weight=load_balance_weight,
                     dropout=model_config.dropout_rate,
                     use_residual=True,
+                    router_type=router_type,
                 )
-                logger.info(f"DSI MoE: {num_experts} experts, Top-{top_k}, hidden={expert_hidden_dim}")
+                tag = "Dense Softmax" if router_type == "dense" else f"Sparse Top-{top_k}"
+                logger.info(f"DSI MoE [{tag}]: {num_experts} experts, hidden={expert_hidden_dim}")
             else:
                 fixed_weights = None
                 if fusion_gate_type == "fixed":
@@ -278,8 +301,24 @@ class TIGER(nn.Module):
             self.pos_emb_scale = nn.Parameter(torch.tensor(0.1))
             logger.info(f"Item/layer embeddings enabled")
 
+        self._init_purified_predictor(training_config)
+
         logger.info(f"Initialized TIGER: vocab={model_config.vocab_size}, d_model={model_config.d_model}")
         logger.info(self.n_parameters)
+
+    def _init_purified_predictor(self, training_config):
+        self.use_purified_predictor = getattr(training_config, 'use_purified_predictor', False)
+        if self.use_purified_predictor:
+            p_dim = getattr(training_config, 'purified_dim', 128)
+            z_clean_dim = p_dim * 2  # z_clean = [h_c_hat || h_t_hat]
+            self.purified_predictor = PurifiedSemanticPredictor(
+                d_model=self.model_config.d_model,
+                purified_dim=z_clean_dim,
+                hidden_dim=z_clean_dim,
+                dropout=self.model_config.dropout_rate,
+            )
+            self.purified_predictor_weight = getattr(training_config, 'purified_predictor_weight', 0.1)
+            logger.info(f"PurifiedSemanticPredictor: d_model={self.model_config.d_model} → {z_clean_dim}D, weight={self.purified_predictor_weight}")
 
     def init_adaptive_temperature(self, trie, semantic_mapper, alpha=0.5, tau_min=0.1, tau_max=2.0,
                                    mean_center=True, k_ref=50.0, start_layer=0):
@@ -314,6 +353,7 @@ class TIGER(nn.Module):
         labels: Optional[torch.Tensor] = None,
         purified_content: Optional[torch.Tensor] = None,
         purified_collab: Optional[torch.Tensor] = None,
+        target_z_clean: Optional[torch.Tensor] = None,
         item_ids: Optional[List[int]] = None,
         return_dict: bool = False
     ) -> Dict[str, torch.Tensor]:
@@ -331,16 +371,17 @@ class TIGER(nn.Module):
 
             if isinstance(self.fusion_module, MoEFusion):
                 fused_emb, fusion_stats = self.fusion_module(
-                    id_emb, content_bc, collab_bc, attention_mask=attention_mask, return_stats=True
+                    id_emb, content_bc, collab_bc,
+                    attention_mask=attention_mask, return_stats=True
                 )
             else:
                 fused_emb = self.fusion_module(id_emb, content_bc, collab_bc)
 
             outputs = self.model(inputs_embeds=fused_emb, attention_mask=attention_mask,
-                                 labels=labels, output_hidden_states=True)
+                                 labels=labels, output_hidden_states=self.use_purified_predictor)
         else:
             outputs = self.model(inputs_embeds=id_emb, attention_mask=attention_mask,
-                                 labels=labels, output_hidden_states=True)
+                                 labels=labels, output_hidden_states=self.use_purified_predictor)
 
         if self.use_adaptive_temperature and self.temperature_loss is not None and labels is not None and item_ids is not None:
             logits = outputs.logits
@@ -350,6 +391,14 @@ class TIGER(nn.Module):
 
         total_loss = main_loss
 
+        # Purified Semantic Predictor auxiliary loss (cosine, direction only)
+        pred_loss = None
+        if self.use_purified_predictor and target_z_clean is not None and labels is not None:
+            decoder_hidden = outputs.decoder_hidden_states[-1]  # (B, num_code_tokens, d_model)
+            pred_z_clean = self.purified_predictor(decoder_hidden)
+            pred_loss = 1.0 - F.cosine_similarity(pred_z_clean, target_z_clean, dim=-1).mean()
+            total_loss = total_loss + self.purified_predictor_weight * pred_loss
+
         # MoE load balancing
         if fusion_stats is not None and 'load_balance_loss' in fusion_stats:
             lb_loss = fusion_stats['load_balance_loss']
@@ -357,8 +406,14 @@ class TIGER(nn.Module):
                 total_loss = total_loss + lb_loss
 
         result = {'loss': total_loss, 'logits': outputs.logits, 'main_loss': main_loss}
-        if fusion_stats is not None and 'load_balance_loss' in fusion_stats:
-            result['moe_load_balance_loss'] = fusion_stats['load_balance_loss'].item() if fusion_stats['load_balance_loss'] is not None else 0.0
+        if pred_loss is not None:
+            result['pred_loss'] = pred_loss.item()
+        if fusion_stats is not None:
+            result['fusion_stats'] = fusion_stats
+            if 'load_balance_loss' in fusion_stats and fusion_stats['load_balance_loss'] is not None:
+                result['moe_load_balance_loss'] = fusion_stats['load_balance_loss'].item()
+            if 'expert_usage' in fusion_stats:
+                result['expert_usage'] = fusion_stats['expert_usage'].detach()
 
         if return_dict:
             return result
@@ -382,7 +437,8 @@ class TIGER(nn.Module):
             collab_bc = self.broadcast_item_to_tokens(purified_collab, None, num_tokens)
 
             if isinstance(self.fusion_module, MoEFusion):
-                fused_emb, _ = self.fusion_module(id_emb, content_bc, collab_bc, attention_mask=attention_mask, return_stats=False)
+                fused_emb, _ = self.fusion_module(id_emb, content_bc, collab_bc,
+                                                   attention_mask=attention_mask, return_stats=False)
             else:
                 fused_emb = self.fusion_module(id_emb, content_bc, collab_bc)
 

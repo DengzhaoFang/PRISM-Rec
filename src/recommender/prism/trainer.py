@@ -145,9 +145,11 @@ class Trainer:
         self.model.train()
         total_loss = 0.0
         total_main_loss = 0.0
+        total_pred_loss = 0.0
         num_batches = 0
         self.total_moe_lb_loss = 0.0
         use_multimodal = self.training_config.use_multimodal_fusion
+        use_predictor = getattr(self.training_config, 'use_purified_predictor', False)
 
         progress_bar = tqdm(self.train_loader, desc=f"Epoch {self.current_epoch + 1}/{self.num_epochs} [Train]")
 
@@ -165,25 +167,31 @@ class Trainer:
 
             purified_content = None
             purified_collab = None
+            target_z_clean = None
             if use_multimodal and 'history_purified_content' in batch:
                 purified_content = batch['history_purified_content'].to(self.device)
                 purified_collab = batch['history_purified_collab'].to(self.device)
+            if use_predictor and 'target_z_clean' in batch:
+                target_z_clean = batch['target_z_clean'].to(self.device)
 
             self.optimizer.zero_grad()
 
             output = self.model(
                 input_ids=input_ids, attention_mask=attention_mask, labels=labels,
                 purified_content=purified_content, purified_collab=purified_collab,
+                target_z_clean=target_z_clean,
                 item_ids=item_ids, return_dict=True
             )
 
             if isinstance(output, dict):
                 loss = output['loss']
                 main_loss = output.get('main_loss', loss)
+                pred_loss = output.get('pred_loss', None)
                 moe_lb_loss = output.get('moe_load_balance_loss', 0.0)
             else:
                 loss, _ = output
                 main_loss = loss
+                pred_loss = None
                 moe_lb_loss = 0.0
 
             loss.backward()
@@ -198,6 +206,8 @@ class Trainer:
 
             total_loss += loss.item()
             total_main_loss += main_loss.item() if isinstance(main_loss, torch.Tensor) else main_loss
+            if pred_loss is not None:
+                total_pred_loss += pred_loss
             num_batches += 1
             self.global_step += 1
 
@@ -206,6 +216,9 @@ class Trainer:
 
             postfix = {'loss': loss.item(), 'avg': total_loss / num_batches}
 
+            if use_predictor and total_pred_loss > 0:
+                postfix['pred'] = total_pred_loss / num_batches
+
             if use_multimodal and hasattr(self, 'total_moe_lb_loss') and self.total_moe_lb_loss > 0:
                 postfix['moe_lb'] = self.total_moe_lb_loss / num_batches
 
@@ -213,9 +226,35 @@ class Trainer:
                 alpha = torch.sigmoid(self.model.fusion_module.fusion_alpha).item()
                 postfix['a'] = f"{alpha:.3f}"
 
+            if use_multimodal and hasattr(self.model, 'fusion_module') and \
+               getattr(self.model.fusion_module, 'router_type', None) == 'dense':
+                ew = output.get('expert_usage')
+                if ew is not None:
+                    postfix['mod'] = f"{ew[0].item():.2f}/{ew[1].item():.2f}/{ew[2].item():.2f}"
+
             progress_bar.set_postfix(postfix)
 
-        return {'total_loss': total_loss / num_batches, 'main_loss': total_main_loss / num_batches}
+            # Periodic MoE expert distribution logging
+            if use_multimodal and self.global_step % self.training_config.log_every_n_steps == 0:
+                expert_usage = output.get('expert_usage')
+                if expert_usage is not None:
+                    eu = expert_usage.detach().cpu()
+                    is_dense = (hasattr(self.model, 'fusion_module') and
+                                getattr(self.model.fusion_module, 'router_type', None) == 'dense')
+                    if is_dense:
+                        usage_str = " ".join([f"E{i}={eu[i].item():.3f}" for i in range(len(eu))])
+                        logger.info(f"  Step {self.global_step} Modality weights: {usage_str}")
+                    else:
+                        usage_str = " ".join([f"E{i}={eu[i].item():.0f}" for i in range(len(eu))])
+                        logger.info(f"  Step {self.global_step} MoE usage: {usage_str}")
+                    if hasattr(self.model, 'fusion_module') and hasattr(self.model.fusion_module, 'fusion_alpha'):
+                        alpha = torch.sigmoid(self.model.fusion_module.fusion_alpha).item()
+                        logger.info(f"  Fusion alpha: {alpha:.4f}")
+
+        metrics = {'total_loss': total_loss / num_batches, 'main_loss': total_main_loss / num_batches}
+        if total_pred_loss > 0:
+            metrics['pred_loss'] = total_pred_loss / num_batches
+        return metrics
 
     def evaluate(self, data_loader, split_name="Valid") -> Dict[str, float]:
         self.model.eval()
@@ -350,7 +389,11 @@ class Trainer:
             if isinstance(train_losses, dict):
                 self.history['train_loss'].append(train_losses['total_loss'])
                 current_lr = self.optimizer.param_groups[0]['lr']
-                logger.info(f"Training - Total: {train_losses['total_loss']:.4f}, Main: {train_losses['main_loss']:.4f} | LR: {current_lr:.6f}")
+                parts = f"Training - Total: {train_losses['total_loss']:.4f}, Main: {train_losses['main_loss']:.4f}"
+                if 'pred_loss' in train_losses:
+                    parts += f", Pred: {train_losses['pred_loss']:.4f}"
+                parts += f" | LR: {current_lr:.6f}"
+                logger.info(parts)
             else:
                 self.history['train_loss'].append(train_losses)
                 logger.info(f"Training loss: {train_losses:.4f}")

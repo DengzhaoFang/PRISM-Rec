@@ -182,18 +182,26 @@ class PRISMTrainer:
         use_saco = (
             self.config.get('use_saco', False) and self.dataset.has_cooc
         )
+        use_cma = self.config.get('use_ide', True)
 
         self.loss_fn = PRISMTotalLoss(
             commitment_weight=self.config.get('beta', 0.25),
             use_saco=use_saco,
             lambda_sac=self.config.get('lambda_sac', 0.1),
             saco_temperature=self.config.get('saco_temperature', 0.07),
+            use_cma=use_cma,
+            lambda_cma=self.config.get('lambda_cma', 0.1),
+            cma_temperature=self.config.get('cma_temperature', 0.07),
         )
 
         self.loss_fn = self.loss_fn.to(self.device)
         self.logger.info("Loss function initialized")
         self.logger.info(f"  UPR: MSE(z_dec, z_clean.detach()) — 256D unified reconstruction")
         self.logger.info(f"  β (commitment)={self.config.get('beta', 0.25)}")
+        self.logger.info(f"  CMA: {'ENABLED' if use_cma else 'DISABLED'}")
+        if use_cma:
+            self.logger.info(f"    λ_cma={self.config.get('lambda_cma', 0.1)}")
+            self.logger.info(f"    τ_cma={self.config.get('cma_temperature', 0.07)}")
         self.logger.info(f"  SACO: {'ENABLED' if use_saco else 'DISABLED'}")
         if use_saco:
             self.logger.info(f"    λ_sac={self.config.get('lambda_sac', 0.1)}")
@@ -203,7 +211,6 @@ class PRISMTrainer:
         self.model.train()
         epoch_metrics = defaultdict(float)
 
-        # Track consistency statistics (replaces old gate tracking)
         consistency_stats = defaultdict(float)
         n_consistency_samples = 0
 
@@ -213,11 +220,10 @@ class PRISMTrainer:
         )
 
         for batch_idx, batch in enumerate(progress_bar):
+            # Anchor forward pass (full pipeline)
             content_emb = batch['content_emb'].to(self.device)
             collab_emb = batch['collab_emb'].to(self.device)
-            item_ids = batch['item_id'].cpu().numpy()
 
-            # Forward pass
             outputs = self.model(
                 content_emb=content_emb,
                 collab_emb=collab_emb,
@@ -228,9 +234,21 @@ class PRISMTrainer:
             z_dec = outputs['z_dec']
             z_clean = outputs['z_clean']
             vq_loss = outputs['codebook_loss']
-            z = outputs.get('z', None)
+            z_anchor = outputs['z']
 
-            # Track MCD consistency
+            # CMA inputs (raw IDE projections, pre-MCD)
+            h_t = outputs.get('h_t')
+            h_c = outputs.get('h_c')
+
+            # Positive encode (latent only, for SACO)
+            z_pos = None
+            if self.loss_fn.use_saco:
+                pos_content = batch['pos_content_emb'].to(self.device)
+                pos_collab = batch['pos_collab_emb'].to(self.device)
+                pos_enc = self.model.encode(pos_content, pos_collab)
+                z_pos = pos_enc['z']
+
+            # Track MCD consistency (computed from raw IDE outputs)
             consistency = outputs.get('consistency')
             if consistency is not None:
                 consistency_stats['mean'] += consistency.mean().item()
@@ -239,20 +257,14 @@ class PRISMTrainer:
                 consistency_stats['max'] += consistency.max().item()
                 n_consistency_samples += 1
 
-            # Get positive pairs for SACO
-            pos_a, pos_b = None, None
-            if self.loss_fn.use_saco and z is not None:
-                pos_a, pos_b = self.dataset.get_positive_pairs(item_ids)
-                pos_a = pos_a.to(self.device)
-                pos_b = pos_b.to(self.device)
-
             total_loss, loss_dict = self.loss_fn(
                 z_dec=z_dec,
                 z_clean=z_clean,
                 commitment_loss=vq_loss,
-                z=z,
-                pos_indices_a=pos_a,
-                pos_indices_b=pos_b,
+                h_t=h_t,
+                h_c=h_c,
+                z_anchor=z_anchor,
+                z_pos=z_pos,
             )
 
             self.optimizer.zero_grad()
@@ -280,6 +292,8 @@ class PRISMTrainer:
                 'upr': loss_dict['upr'],
                 'lr': self.optimizer.param_groups[0]['lr'],
             }
+            if 'cma' in loss_dict:
+                postfix_dict['cma'] = loss_dict['cma']
             if 'saco' in loss_dict:
                 postfix_dict['saco'] = loss_dict['saco']
             if n_consistency_samples > 0:
@@ -726,6 +740,66 @@ class PRISMTrainer:
 
         self.apply_sinkhorn_reassignment()
 
+    def export_purified_embeddings(self):
+        """Export MCD-purified h_t_hat and h_c_hat for Stage 2 DSI."""
+        self.logger.info("\n" + "=" * 80)
+        self.logger.info("Exporting Purified Embeddings for Stage 2")
+        self.logger.info("=" * 80)
+
+        best_model_path = self.output_dir / 'best_model.pt'
+        if best_model_path.exists():
+            checkpoint = torch.load(best_model_path, map_location=self.device)
+            self.model.load_state_dict(checkpoint['model_state_dict'])
+            self.logger.info(f"Loaded best model from {best_model_path}")
+
+        self.model.eval()
+        n_items = len(self.dataset)
+        ide_dim = self.config.get('ide_dim', 128)
+
+        purified_content = np.zeros((n_items, ide_dim), dtype=np.float32)
+        purified_collab = np.zeros((n_items, ide_dim), dtype=np.float32)
+        item_ids_out = np.zeros(n_items, dtype=np.int64)
+
+        idx = 0
+        with torch.no_grad():
+            for batch in tqdm(self.train_loader, desc="Exporting purified features"):
+                content_emb = batch['content_emb'].to(self.device)
+                collab_emb = batch['collab_emb'].to(self.device)
+                item_ids = batch['item_id'].cpu().numpy()
+
+                enc_outputs = self.model.encode(content_emb, collab_emb)
+                h_t_hat = enc_outputs['h_t_hat'].cpu().numpy()
+                h_c_hat = enc_outputs['h_c_hat'].cpu().numpy()
+
+                b = len(item_ids)
+                purified_content[idx:idx + b] = h_t_hat
+                purified_collab[idx:idx + b] = h_c_hat
+                item_ids_out[idx:idx + b] = item_ids
+                idx += b
+
+        np.save(self.output_dir / 'item_purified_content.npy', purified_content)
+        np.save(self.output_dir / 'item_purified_collab.npy', purified_collab)
+        np.save(self.output_dir / 'item_purified_ids.npy', item_ids_out)
+
+        # Also export codebook z_q (sum of all layer codebook vectors, 32D)
+        latent_dim = self.config.get('latent_dim', 32)
+        codebook_zq = np.zeros((n_items, latent_dim), dtype=np.float32)
+        with torch.no_grad():
+            idx = 0
+            for batch in tqdm(self.train_loader, desc="Exporting codebook z_q"):
+                content_emb = batch['content_emb'].to(self.device)
+                collab_emb = batch['collab_emb'].to(self.device)
+                b = len(batch['item_id'])
+                z = self.model.encode(content_emb, collab_emb)['z']
+                z_q, _, _, _, _ = self.model.quantize(z)
+                codebook_zq[idx:idx + b] = z_q.cpu().numpy()
+                idx += b
+        np.save(self.output_dir / 'item_codebook_zq.npy', codebook_zq)
+
+        self.logger.info(f"Purified features exported: {n_items} items, {ide_dim}D each")
+        self.logger.info(f"Codebook z_q exported: {n_items} items, {latent_dim}D each")
+        self.logger.info("=" * 80)
+
     def apply_sinkhorn_reassignment(self):
         self.logger.info("\n" + "=" * 80)
         self.logger.info("Applying Sinkhorn Algorithm for Collision Elimination")
@@ -807,6 +881,8 @@ class PRISMTrainer:
                     f"range=[{train_metrics['consistency_min']:.3f}, {train_metrics['consistency_max']:.3f}]"
                 )
 
+            if 'cma' in train_metrics:
+                self.logger.info(f"  CMA Loss: {train_metrics['cma']:.4f}")
             if 'saco' in train_metrics:
                 self.logger.info(f"  SACO Loss: {train_metrics['saco']:.4f}")
 
@@ -844,6 +920,7 @@ class PRISMTrainer:
 
         self.save_item_codebook_mappings()
         self.generate_semantic_ids_and_analyze()
+        self.export_purified_embeddings()
 
 
 def parse_args():
@@ -885,6 +962,12 @@ def parse_args():
                         help='Weight for SACO loss')
     parser.add_argument('--saco_temperature', type=float, default=0.07,
                         help='Temperature for SACO contrastive loss')
+
+    # CMA arguments
+    parser.add_argument('--lambda_cma', type=float, default=0.1,
+                        help='Weight for Cross-Modal Alignment loss')
+    parser.add_argument('--cma_temperature', type=float, default=0.07,
+                        help='Temperature for CMA InfoNCE loss')
 
     # Training arguments
     parser.add_argument('--epochs', type=int, default=500,

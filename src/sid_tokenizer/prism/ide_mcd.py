@@ -100,13 +100,18 @@ class MCDModule(nn.Module):
 
         s = self._consistency_score(h_t, h_c)  # (B,)
 
-        # Operation A: collab reliability denoising with safety fallback
+        # Operation A: pure collaborative gating (no text leakage)
+        # Removed safety fallback (1-g_c)*h_t — collaborative signal is the
+        # primary driver for recommendation and must not be diluted by text.
+        # The gate suppresses noisy collab dimensions in-place without substitution.
         s_expanded = s.unsqueeze(-1)  # (B, 1)
         g_c = torch.sigmoid(self.W_gc(torch.cat([h_c, s_expanded], dim=-1)) + self.b_gc)
-        h_c_hat = g_c * h_c + (1.0 - g_c) * h_t
+        h_c_hat = g_c * h_c
 
         # Operation B: text relevance suppression
-        g_t = torch.sigmoid(self.W_gt(h_c) + self.b_gt)
+        # Uses denoised h_c_hat as context — noisy collab would produce
+        # unreliable gates, defeating the purpose of cross-modal guidance.
+        g_t = torch.sigmoid(self.W_gt(h_c_hat) + self.b_gt)
         h_t_hat = g_t * h_t
 
         return h_t_hat, h_c_hat, s

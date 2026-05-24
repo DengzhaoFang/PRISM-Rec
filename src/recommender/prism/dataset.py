@@ -53,6 +53,54 @@ def load_purified_embeddings(content_path: str, collab_path: str) -> Tuple[Dict[
     return content_dict, collab_dict
 
 
+def load_content_embeddings(data_dir: str) -> Dict[int, np.ndarray]:
+    """Load raw content embeddings (768D) from item_emb.parquet."""
+    parquet_path = os.path.join(data_dir, 'item_emb.parquet')
+    if not os.path.exists(parquet_path):
+        logger.warning(f"Content embeddings not found at {parquet_path}")
+        return {}
+    import pandas as pd
+    item_df = pd.read_parquet(parquet_path)
+    item_ids = item_df['ItemID'].values
+    emb_col = 'attribute_embedding' if 'attribute_embedding' in item_df.columns else 'embedding'
+    embeddings = np.stack([np.array(emb) for emb in item_df[emb_col]])
+    content_dict = {int(iid): embeddings[i].astype(np.float32) for i, iid in enumerate(item_ids)}
+    logger.info(f"Loaded raw content embeddings: {len(content_dict)} items, dim={embeddings.shape[1]}")
+    return content_dict
+
+
+def load_collab_embeddings(file_path: str) -> Dict[int, np.ndarray]:
+    """Load raw collaborative embeddings (64D) from .npy file."""
+    if not os.path.exists(file_path):
+        logger.warning(f"Collab embeddings not found at {file_path}")
+        return {}
+    embeddings = np.load(file_path, allow_pickle=True)
+    if file_path.endswith('.npz'):
+        data = np.load(file_path, allow_pickle=True)
+        item_ids = data['item_ids']
+        embeddings = data['embeddings']
+        collab_dict = {int(iid): embeddings[i].astype(np.float32) for i, iid in enumerate(item_ids)}
+    else:
+        collab_dict = {i: embeddings[i].astype(np.float32) for i in range(len(embeddings))}
+    logger.info(f"Loaded raw collab embeddings: {len(collab_dict)} items, dim={embeddings.shape[1]}")
+    return collab_dict
+
+
+def load_codebook_zq(zq_path: str) -> Dict[int, np.ndarray]:
+    """Load RQ-VAE quantized latent z_q (32D) for all items."""
+    if not os.path.exists(zq_path):
+        logger.warning(f"Codebook z_q not found at {zq_path}")
+        return {}
+
+    ids_path = os.path.join(os.path.dirname(zq_path), 'item_purified_ids.npy')
+    zq_arr = np.load(zq_path)
+    item_ids = np.load(ids_path) if os.path.exists(ids_path) else np.arange(len(zq_arr))
+
+    zq_dict = {int(item_ids[i]): zq_arr[i].astype(np.float32) for i in range(len(item_ids))}
+    logger.info(f"Loaded codebook z_q for {len(zq_dict)} items, dim={zq_arr.shape[1]}")
+    return zq_dict
+
+
 class SemanticIDMapper:
     """Manages the mapping from item IDs to semantic codes."""
 
@@ -210,6 +258,7 @@ class GenRecDataset(Dataset):
         pad_token_id: int = 0,
         purified_content: Optional[Dict[int, np.ndarray]] = None,
         purified_collab: Optional[Dict[int, np.ndarray]] = None,
+        codebook_zq: Optional[Dict[int, np.ndarray]] = None,
         use_multimodal: bool = False,
     ):
         self.sequence_file = sequence_file
@@ -217,12 +266,12 @@ class GenRecDataset(Dataset):
         self.mode = mode
         self.max_len = max_len
         self.pad_token_id = pad_token_id
-        self.purified_content = purified_content or {}
-        self.purified_collab = purified_collab or {}
+        self.purified_content = purified_content or {}  # MCD h_t_hat (128D)
+        self.purified_collab = purified_collab or {}    # MCD h_c_hat (128D)
+        self.codebook_zq = codebook_zq or {}
         self.use_multimodal = use_multimodal
 
-        self.purified_dim = 128  # from Stage 1 IDE
-
+        self.purified_dim = 128
         if self.purified_content:
             sample = next(iter(self.purified_content.values()))
             self.purified_dim = sample.shape[0]
@@ -232,7 +281,7 @@ class GenRecDataset(Dataset):
 
         logger.info(f"Dataset initialized with {len(self.data)} samples")
         if use_multimodal and self.purified_content:
-            logger.info(f"  Purified DSI: {len(self.purified_content)} items, dim={self.purified_dim}")
+            logger.info(f"  Purified DSI: dim={self.purified_dim}D")
 
     def _convert_to_codes(self):
         logger.info("Converting item IDs to semantic codes...")
@@ -276,13 +325,11 @@ class GenRecDataset(Dataset):
         }
 
         if self.use_multimodal:
-            # Purified content (128D)
             history_purified_content = np.zeros((self.max_len, self.purified_dim), dtype=np.float32)
             for i, iid in enumerate(history_item_ids_padded):
                 if iid in self.purified_content:
                     history_purified_content[i] = self.purified_content[iid]
 
-            # Purified collab (128D)
             history_purified_collab = np.zeros((self.max_len, self.purified_dim), dtype=np.float32)
             for i, iid in enumerate(history_item_ids_padded):
                 if iid in self.purified_collab:
@@ -292,6 +339,15 @@ class GenRecDataset(Dataset):
                 'history_purified_content': history_purified_content,
                 'history_purified_collab': history_purified_collab,
             })
+
+            # Target z_clean = [h_c_hat || h_t_hat] (256D) for PurifiedSemanticPredictor
+            target_z_clean = np.zeros(self.purified_dim * 2, dtype=np.float32)
+            if target_item_id in self.purified_collab and target_item_id in self.purified_content:
+                target_z_clean = np.concatenate([
+                    self.purified_collab[target_item_id],
+                    self.purified_content[target_item_id],
+                ])
+            result['target_z_clean'] = target_z_clean
 
         return result
 
@@ -348,7 +404,7 @@ def create_datasets(
     dataset_kwargs = dict(
         semantic_mapper=semantic_mapper, max_len=max_len, pad_token_id=pad_token_id,
         purified_content=purified_content_dict, purified_collab=purified_collab_dict,
-        use_multimodal=use_multimodal
+        codebook_zq={}, use_multimodal=use_multimodal
     )
 
     train_dataset = GenRecDataset(str(data_dir / "train.parquet"), mode='train', **dataset_kwargs)

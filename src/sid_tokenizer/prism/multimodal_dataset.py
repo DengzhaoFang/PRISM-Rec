@@ -5,9 +5,13 @@ Loads and combines:
 1. Content embeddings (768D from TIGER-format item_emb.parquet)
 2. Collaborative embeddings (64D from LightGCN)
 3. Co-occurrence graph from user sequences (for SACO loss)
+
+Returns paired data (anchor, positive) when co-occurrence graph is available,
+ensuring every anchor has a guaranteed hard positive for SACO contrastive learning.
 """
 
 import os
+import random
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Set
 from collections import defaultdict
@@ -24,6 +28,9 @@ class PRISMDataset(Dataset):
 
     Combines item content embeddings, collaborative embeddings,
     and co-occurrence graph for sequence-aware contrastive learning.
+
+    Returns each item paired with a randomly-sampled co-occurring positive,
+    guaranteeing every anchor has a hard positive for SACO.
     """
 
     def __init__(
@@ -65,7 +72,7 @@ class PRISMDataset(Dataset):
         self.item_id_to_idx = {int(item_id): idx for idx, item_id in enumerate(self.item_ids)}
 
         # Load co-occurrence graph from training sequences
-        self.cooc_graph = None
+        self.cooc_graph = {}
         self.has_cooc = False
         train_seq_path = self.data_dir / train_seq_file
         if train_seq_file and train_seq_path.exists():
@@ -79,6 +86,8 @@ class PRISMDataset(Dataset):
         if self.has_cooc:
             print(f"  Co-occurrence graph: {len(self.cooc_graph)} items, "
                   f"{sum(len(v) for v in self.cooc_graph.values())} edges")
+        else:
+            print(f"  Co-occurrence graph: DISABLED")
 
     def _build_cooc_graph(self, train_seq_path: Path) -> None:
         """
@@ -104,63 +113,42 @@ class PRISMDataset(Dataset):
                         self.cooc_graph[a].append(b)
                         self.cooc_graph[b].append(a)
 
-        # Remove items with no co-occurrences from the graph
         self.cooc_graph = dict(self.cooc_graph)
         self.has_cooc = len(self.cooc_graph) > 0
         print(f"  Co-occurrence graph built: {len(self.cooc_graph)} items with edges")
 
-    def get_positive_pairs(
-        self, item_ids: np.ndarray
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _sample_positive(self, item_id: int) -> int:
         """
-        Find positive (co-occurring) pairs within a batch of items.
+        Randomly sample a co-occurring positive item.
 
-        For each item that has co-occurring items also in the batch,
-        creates a positive pair for SACO contrastive loss.
-
-        Args:
-            item_ids: Array of item IDs in the batch (B,)
-
-        Returns:
-            anchor_indices: Tensor of anchor indices within the batch (P,)
-            pos_indices: Tensor of positive partner indices within the batch (P,)
+        Returns the item itself (identity fallback) for cold items with no co-occurrences.
+        The identity pair provides near-zero gradient in SACO InfoNCE,
+        effectively skipping the contrastive loss for that anchor.
         """
-        if not self.has_cooc:
-            return (
-                torch.tensor([], dtype=torch.long),
-                torch.tensor([], dtype=torch.long),
-            )
-
-        # Build set of item IDs in this batch
-        batch_id_set: Set[int] = set(int(x) for x in item_ids)
-        id_to_batch_idx = {int(item_id): i for i, item_id in enumerate(item_ids)}
-
-        anchors = []
-        positives = []
-
-        for batch_idx, item_id in enumerate(item_ids):
-            item_id = int(item_id)
-            cooc_items = self.cooc_graph.get(item_id, [])
-            # Find co-occurring items that are also in this batch
-            for cooc_id in cooc_items:
-                if cooc_id in batch_id_set and cooc_id != item_id:
-                    anchors.append(batch_idx)
-                    positives.append(id_to_batch_idx[cooc_id])
-                    break  # Just one positive pair per anchor item
-
-        return (
-            torch.tensor(anchors, dtype=torch.long),
-            torch.tensor(positives, dtype=torch.long),
-        )
+        cooc_list = self.cooc_graph.get(item_id, [])
+        if len(cooc_list) == 0:
+            return item_id
+        return int(random.choice(cooc_list))
 
     def __len__(self) -> int:
         return self.num_items
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        anchor_item_id = int(self.item_ids[idx])
+
+        if self.has_cooc:
+            pos_item_id = self._sample_positive(anchor_item_id)
+            pos_idx = self.item_id_to_idx[pos_item_id]
+        else:
+            pos_item_id = anchor_item_id
+            pos_idx = idx
+
         return {
-            'item_id': self.item_ids[idx],
+            'item_id': anchor_item_id,
             'content_emb': self.content_embeddings[idx],
             'collab_emb': self.collab_embeddings[idx],
+            'pos_content_emb': self.content_embeddings[pos_idx],
+            'pos_collab_emb': self.collab_embeddings[pos_idx],
         }
 
 
@@ -194,4 +182,6 @@ def collate_prism_batch(batch: List[Dict]) -> Dict[str, torch.Tensor]:
         'item_id': torch.tensor([item['item_id'] for item in batch]),
         'content_emb': torch.stack([item['content_emb'] for item in batch]),
         'collab_emb': torch.stack([item['collab_emb'] for item in batch]),
+        'pos_content_emb': torch.stack([item['pos_content_emb'] for item in batch]),
+        'pos_collab_emb': torch.stack([item['pos_collab_emb'] for item in batch]),
     }

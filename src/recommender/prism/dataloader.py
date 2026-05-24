@@ -59,6 +59,11 @@ def collate_fn(batch: List[Dict], pad_token_id: int = 0, use_dynamic_batching: b
         result['history_purified_collab'] = torch.stack([
             torch.from_numpy(item['history_purified_collab']) for item in batch
         ])
+
+    if 'target_z_clean' in batch[0]:
+        result['target_z_clean'] = torch.stack([
+            torch.from_numpy(item['target_z_clean']) for item in batch
+        ])
     
     if 'history_item_ids' in batch[0]:
         result['history_item_ids'] = [item['history_item_ids'] for item in batch]
@@ -100,13 +105,16 @@ class GenRecDataLoader(DataLoader):
         # Create collate function with pad_token_id and dynamic batching
         def _collate_fn(batch):
             return collate_fn(batch, pad_token_id=pad_token_id, use_dynamic_batching=use_dynamic_batching)
-        
+
         super().__init__(
             dataset,
             batch_size=batch_size,
             shuffle=shuffle,
             num_workers=num_workers,
             collate_fn=_collate_fn,
+            pin_memory=True,
+            persistent_workers=num_workers > 0,
+            prefetch_factor=2 if num_workers > 0 else None,
             **kwargs
         )
 

@@ -1,0 +1,75 @@
+{
+  "description": "Cross-modal neighbor agreement by popularity \u2014 no training",
+  "config": {
+    "K": 20,
+    "NUM_BUCKETS": 8,
+    "bucketing": "log-spaced item popularity"
+  },
+  "buckets": {
+    "0": {
+      "label": "B0 [1-5]",
+      "n_items": 1445
+    },
+    "1": {
+      "label": "B1 [5-6]",
+      "n_items": 1517
+    },
+    "2": {
+      "label": "B2 [6-6]",
+      "n_items": 0
+    },
+    "3": {
+      "label": "B3 [6-7]",
+      "n_items": 3024
+    },
+    "4": {
+      "label": "B4 [7-10]",
+      "n_items": 1537
+    },
+    "5": {
+      "label": "B5 [10-12]",
+      "n_items": 1327
+    },
+    "6": {
+      "label": "B6 [12-22]",
+      "n_items": 1697
+    },
+    "7": {
+      "label": "B7 [22-378]",
+      "n_items": 1521
+    }
+  },
+  "jaccard": [
+    0.018872,
+    0.024059,
+    0.0,
+    0.025832,
+    0.033083,
+    0.036721,
+    0.044865,
+    0.044286
+  ],
+  "text_precision": [
+    0.034221,
+    0.043144,
+    0.0,
+    0.046445,
+    0.058523,
+    0.064846,
+    0.077902,
+    0.079158
+  ],
+  "collab_precision": [
+    0.034221,
+    0.043144,
+    0.0,
+    0.046445,
+    0.058523,
+    0.064846,
+    0.077902,
+    0.079158
+  ],
+  "cold_mean_jaccard": 0.01431,
+  "hot_mean_jaccard": 0.041957,
+  "hot_cold_ratio": 2.9319
+}

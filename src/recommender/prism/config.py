@@ -1,7 +1,5 @@
 """
 Configuration management for the recommender system.
-
-Provides dataset-specific configurations and model hyperparameters.
 """
 
 from dataclasses import dataclass, field
@@ -11,7 +9,6 @@ import os
 
 @dataclass
 class ModelConfig:
-    """T5 Nano model configuration."""
     num_layers: int = 4
     num_decoder_layers: int = 4
     d_model: int = 64
@@ -21,8 +18,7 @@ class ModelConfig:
     dropout_rate: float = 0.1
     feed_forward_proj: str = "relu"
 
-    # Semantic code parameters
-    num_code_layers: int = 3  # Number of RQ-VAE layers (changed from 4 to 3)
+    num_code_layers: int = 3
     codebook_size: int = 256
     codebook_sizes: Optional[List[int]] = None
 
@@ -40,34 +36,32 @@ class ModelConfig:
         return self.num_code_layers * self.codebook_size + 1
 
     @property
-    def pad_token_id(self) -> int:
-        return 0
+    def pad_token_id(self) -> int: return 0
 
     @property
-    def eos_token_id(self) -> int:
-        return 0
+    def eos_token_id(self) -> int: return 0
 
 
 def get_model_config(model_type: str = "default") -> ModelConfig:
     if model_type == "t5-pico":
-        return ModelConfig(num_layers=2, num_decoder_layers=2, d_model=32, d_ff=128, num_heads=1, d_kv=32, dropout_rate=0.1, feed_forward_proj="relu")
+        return ModelConfig(num_layers=2, num_decoder_layers=2, d_model=32, d_ff=128, num_heads=1, d_kv=32)
     elif model_type == "t5-nano":
         return ModelConfig()
     elif model_type == "t5-micro":
-        return ModelConfig(num_layers=4, num_decoder_layers=4, d_model=128, d_ff=512, num_heads=2, d_kv=64, dropout_rate=0.2, feed_forward_proj="relu")
+        return ModelConfig(num_layers=4, num_decoder_layers=4, d_model=128, d_ff=512, num_heads=2, d_kv=64, dropout_rate=0.2)
     elif model_type == "t5-tiny":
-        return ModelConfig(num_layers=4, num_decoder_layers=4, d_model=64, d_ff=1024, num_heads=6, d_kv=64, dropout_rate=0.1, feed_forward_proj="relu")
+        return ModelConfig(num_layers=4, num_decoder_layers=4, d_model=64, d_ff=1024, num_heads=6, d_kv=64)
     elif model_type == "t5-tiny-2":
-        return ModelConfig(num_layers=4, num_decoder_layers=4, d_model=128, d_ff=1024, num_heads=6, d_kv=64, dropout_rate=0.1, feed_forward_proj="relu")
+        return ModelConfig(num_layers=4, num_decoder_layers=4, d_model=128, d_ff=1024, num_heads=6, d_kv=64)
     elif model_type == "t5-small":
-        return ModelConfig(num_layers=6, num_decoder_layers=6, d_model=512, d_ff=2048, num_heads=8, d_kv=64, dropout_rate=0.1, feed_forward_proj="relu")
+        return ModelConfig(num_layers=6, num_decoder_layers=6, d_model=512, d_ff=2048, num_heads=8, d_kv=64)
     else:
         raise ValueError(f"Unknown model type: {model_type}")
 
 
 @dataclass
 class DataConfig:
-    """Data configuration for different datasets."""
+    """Data configuration. Purified features loaded from Stage 1 output dir."""
     dataset_name: str
     sequence_data_path: str
     semantic_mapping_path: str
@@ -84,7 +78,6 @@ class DataConfig:
 
 @dataclass
 class TrainingConfig:
-    """Training configuration."""
     batch_size: int = 128
     eval_batch_size: int = 128
     num_epochs: int = 200
@@ -101,7 +94,7 @@ class TrainingConfig:
     lr_step_size: int = 50
     lr_gamma: float = 0.95
 
-    eval_every_n_epochs: int = 1
+    eval_every_n_epochs: int = 3
     topk_list: List[int] = field(default_factory=lambda: [5, 10, 20])
     beam_size: int = 30
 
@@ -118,36 +111,31 @@ class TrainingConfig:
     num_workers: int = 4
     seed: int = 42
 
-    # ============================================================
-    # DSI: Dynamic Semantic Integration (3-way purified MoE)
-    # ============================================================
+    # DSI: 3-way purified MoE fusion
     use_multimodal_fusion: bool = False
-    fusion_gate_type: str = "moe"               # "moe", "learned", "attention", "fixed"
-    purified_dim: int = 128                      # h_t_hat / h_c_hat dimension from Stage 1 IDE
-    fusion_alpha_init: float = -2.0              # sigmoid(-2.0) ≈ 0.12
+    fusion_gate_type: str = "moe"           # "moe", "dense", "learned", "attention", "fixed"
+    purified_dim: int = 128                  # MCD-denoised feature dim from Stage 1
+
+    # Purified Semantic Predictor: auxiliary MSE on target z_clean (256D)
+    use_purified_predictor: bool = False
+    purified_predictor_weight: float = 0.1
 
     # MoE parameters
     moe_num_experts: int = 3
     moe_expert_hidden_dim: int = 256
     moe_top_k: int = 2
-    moe_use_load_balancing: bool = False
-    moe_load_balance_weight: float = 0.001
+    moe_use_load_balancing: bool = True
+    moe_load_balance_weight: float = 0.01
 
-    # ============================================================
-    # Structural Improvements
-    # ============================================================
+    # Structural features
     use_dynamic_batching: bool = False
     use_item_layer_emb: bool = False
     use_temporal_decay: bool = True
 
-    # ============================================================
     # Trie-Constrained Decoding
-    # ============================================================
     use_trie_constraints: bool = False
 
-    # ============================================================
     # Adaptive Temperature Scaling
-    # ============================================================
     use_adaptive_temperature: bool = False
     tau_alpha: float = 0.5
     tau_min: float = 0.1
@@ -158,14 +146,10 @@ class TrainingConfig:
 
 
 def _create_dataset_config(
-    dataset_name: str,
-    sequence_data_path: Optional[str],
-    semantic_mapping_path: Optional[str],
-    output_dir: Optional[str],
-    checkpoint_dir: Optional[str],
-    model_type: str,
-    default_paths: dict,
-    **kwargs
+    dataset_name: str, sequence_data_path: Optional[str],
+    semantic_mapping_path: Optional[str], output_dir: Optional[str],
+    checkpoint_dir: Optional[str], model_type: str,
+    default_paths: dict, **kwargs
 ) -> dict:
     from datetime import datetime
 
@@ -177,18 +161,13 @@ def _create_dataset_config(
     if output_dir is None:
         timestamp = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
         output_keywords = kwargs.get('output_keywords', None)
-        if output_keywords:
-            output_dir = f"scripts/output/recommender/prism/{dataset_name}/{timestamp}_{output_keywords}"
-        else:
-            output_dir = f"scripts/output/recommender/prism/{dataset_name}/{timestamp}"
+        output_dir = f"scripts/output/recommender/prism/{dataset_name}/{timestamp}{'_' + output_keywords if output_keywords else ''}"
 
     checkpoint_dir = checkpoint_dir or output_dir
-
     model_config = get_model_config(model_type)
 
     data_config = DataConfig(
-        dataset_name=dataset_name,
-        sequence_data_path=sequence_data_path,
+        dataset_name=dataset_name, sequence_data_path=sequence_data_path,
         semantic_mapping_path=semantic_mapping_path,
         purified_content_path=purified_content_path,
         purified_collab_path=purified_collab_path,
@@ -206,26 +185,18 @@ def _create_dataset_config(
         training_config = TrainingConfig(
             batch_size=128, eval_batch_size=128, num_epochs=300,
             learning_rate=5e-4, warmup_steps=1000, gradient_clip=1.0,
-            beam_size=30, early_stopping_patience=10, eval_every_n_epochs=1
+            beam_size=30, early_stopping_patience=10, eval_every_n_epochs=3
         )
 
     for key, value in kwargs.items():
-        if value is None:
-            continue
-        if hasattr(model_config, key):
-            setattr(model_config, key, value)
-        elif hasattr(data_config, key):
-            setattr(data_config, key, value)
-        elif hasattr(training_config, key):
-            setattr(training_config, key, value)
+        if value is None: continue
+        if hasattr(model_config, key): setattr(model_config, key, value)
+        elif hasattr(data_config, key): setattr(data_config, key, value)
+        elif hasattr(training_config, key): setattr(training_config, key, value)
 
     return {
-        "model": model_config,
-        "data": data_config,
-        "training": training_config,
-        "output_dir": output_dir,
-        "checkpoint_dir": checkpoint_dir,
-        "model_type": model_type
+        "model": model_config, "data": data_config, "training": training_config,
+        "output_dir": output_dir, "checkpoint_dir": checkpoint_dir, "model_type": model_type
     }
 
 
@@ -239,7 +210,7 @@ def get_beauty_config(
     model_type: str = "t5-tiny-2",
     **kwargs
 ) -> dict:
-    tokenizer_dir = "scripts/output/prism_tokenizer/beauty/3-256-32-ide-mcd-saco"
+    tokenizer_dir = "scripts/output/prism_tokenizer/beauty/3-256-32-ide+mcd+saco-cleancollab"
     default_paths = {
         'sequence_data_path': "dataset/Amazon-Beauty/processed/beauty-tiger-sentenceT5base/Beauty",
         'semantic_mapping_path': f"{tokenizer_dir}/semantic_id_mappings.json",
@@ -247,13 +218,10 @@ def get_beauty_config(
         'purified_collab_path': f"{tokenizer_dir}/item_purified_collab.npy",
     }
     return _create_dataset_config(
-        dataset_name="beauty",
-        sequence_data_path=sequence_data_path,
+        dataset_name="beauty", sequence_data_path=sequence_data_path,
         semantic_mapping_path=semantic_mapping_path,
-        output_dir=output_dir,
-        checkpoint_dir=checkpoint_dir,
-        model_type=model_type,
-        default_paths=default_paths,
+        output_dir=output_dir, checkpoint_dir=checkpoint_dir,
+        model_type=model_type, default_paths=default_paths,
         purified_content_path=purified_content_path,
         purified_collab_path=purified_collab_path,
         **kwargs
@@ -273,17 +241,13 @@ def get_sports_config(
     default_paths = {
         'sequence_data_path': "dataset/Amazon-Sports/processed/sports-tiger-sentenceT5base/Sports",
         'semantic_mapping_path': "scripts/output/prism_tokenizer/sports/3-256-32-ema-only-5-core-items/semantic_id_mappings.json",
-        'purified_content_path': None,
-        'purified_collab_path': None,
+        'purified_content_path': None, 'purified_collab_path': None,
     }
     return _create_dataset_config(
-        dataset_name="sports",
-        sequence_data_path=sequence_data_path,
+        dataset_name="sports", sequence_data_path=sequence_data_path,
         semantic_mapping_path=semantic_mapping_path,
-        output_dir=output_dir,
-        checkpoint_dir=checkpoint_dir,
-        model_type=model_type,
-        default_paths=default_paths,
+        output_dir=output_dir, checkpoint_dir=checkpoint_dir,
+        model_type=model_type, default_paths=default_paths,
         purified_content_path=purified_content_path,
         purified_collab_path=purified_collab_path,
         **kwargs
@@ -309,10 +273,8 @@ def get_cds_config(**kwargs) -> dict:
 
 
 CONFIG_REGISTRY = {
-    "beauty": get_beauty_config,
-    "sports": get_sports_config,
-    "toys": get_toys_config,
-    "cds": get_cds_config
+    "beauty": get_beauty_config, "sports": get_sports_config,
+    "toys": get_toys_config, "cds": get_cds_config
 }
 
 

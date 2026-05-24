@@ -136,7 +136,17 @@ Examples:
         default=None,
         help='Override output directory from config (optional)'
     )
-    
+
+    # Stage 1 path overrides (for hyperparameter sweep)
+    parser.add_argument('--semantic_mapping_path', type=str, default=None,
+                        help='Override semantic_id_mappings.json path from Stage 1')
+    parser.add_argument('--purified_content_path', type=str, default=None,
+                        help='Override item_purified_content.npy path from Stage 1')
+    parser.add_argument('--purified_collab_path', type=str, default=None,
+                        help='Override item_purified_collab.npy path from Stage 1')
+    parser.add_argument('--purified_dim', type=int, default=None,
+                        help='Override purified feature dimension from Stage 1 (default: 128)')
+
     parser.add_argument(
         '--output_keywords',
         type=str,
@@ -159,6 +169,9 @@ Examples:
         help='Logging level (default: INFO)'
     )
     
+    parser.add_argument('--eval_every_n_epochs', type=int, default=None,
+                        help='Evaluate every N epochs (default: 3)')
+
     # Verbose logging
     parser.add_argument(
         '--verbose',
@@ -180,15 +193,15 @@ Examples:
     # NEW FEATURES: Multi-source Information Fusion
     # ============================================================
     
-    # Feature: Multi-source DSI Fusion (purified features)
+    # Feature: Multi-source DSI Fusion (raw features with depth-specific projection)
     parser.add_argument(
         '--use_multimodal_fusion',
         action='store_true',
-        help='Enable DSI: 3-way fusion of ID + purified_content + purified_collab'
+        help='Enable DSI: 4-way fusion of ID + raw_content + raw_collab + codebook_zq'
     )
     parser.add_argument(
         '--fusion_gate_type',
-        type=str, default='moe', choices=['learned', 'fixed', 'attention', 'moe'],
+        type=str, default='moe', choices=['learned', 'fixed', 'attention', 'moe', 'dense'],
         help='Fusion gating mechanism (default: moe)'
     )
 
@@ -204,12 +217,6 @@ Examples:
     parser.add_argument('--moe_load_balance_weight', type=float, default=0.001,
                         help='Load balancing loss weight (default: 0.001)')
 
-    # Purified embedding paths
-    parser.add_argument('--purified_content_path', type=str, default=None,
-                        help='Path to purified content embeddings (h_t_hat, 128D)')
-    parser.add_argument('--purified_collab_path', type=str, default=None,
-                        help='Path to purified collab embeddings (h_c_hat, 128D)')
-    
     # ============================================================
     # NEW FEATURES: Structural Improvements
     # ============================================================
@@ -241,6 +248,18 @@ Examples:
         help='Enable Trie-constrained decoding (ensures all generated paths lead to real items)'
     )
     
+    # Feature 8: Purified Semantic Predictor
+    parser.add_argument(
+        '--use_purified_predictor',
+        action='store_true',
+        help='Enable PurifiedSemanticPredictor: auxiliary MSE loss predicting target z_clean from decoder hidden states'
+    )
+    parser.add_argument(
+        '--purified_predictor_weight',
+        type=float, default=0.1,
+        help='Weight for purified predictor loss (default: 0.1)'
+    )
+
     # Feature 7: Adaptive Temperature Scaling
     parser.add_argument(
         '--use_adaptive_temperature',
@@ -292,8 +311,9 @@ def _load_data(logger, config: dict):
     # Get codebook_sizes if available (for variable-length codebooks)
     codebook_sizes = config['model'].__dict__.get('codebook_sizes', None)
     
-    # Check if multimodal fusion is enabled
+    # Check if multimodal fusion or purified predictor is enabled
     use_multimodal = config['training'].use_multimodal_fusion
+    use_purified_predictor = getattr(config['training'], 'use_purified_predictor', False)
     purified_content_path = config['data'].purified_content_path
     purified_collab_path = config['data'].purified_collab_path
 
@@ -308,7 +328,7 @@ def _load_data(logger, config: dict):
         codebook_sizes=codebook_sizes,
         purified_content_path=purified_content_path,
         purified_collab_path=purified_collab_path,
-        use_multimodal=use_multimodal
+        use_multimodal=use_multimodal or use_purified_predictor
     )
     
     # Log vocabulary statistics
@@ -429,6 +449,9 @@ def _build_config_kwargs(args) -> dict:
     # Verbose logging
     if args.verbose:
         config_kwargs['verbose'] = True
+
+    if args.eval_every_n_epochs is not None:
+        config_kwargs['eval_every_n_epochs'] = args.eval_every_n_epochs
     
     # Learning rate scheduler
     if args.lr_scheduler is not None:
@@ -437,18 +460,13 @@ def _build_config_kwargs(args) -> dict:
     if args.use_multimodal_fusion:
         config_kwargs['use_multimodal_fusion'] = True
         config_kwargs['fusion_gate_type'] = args.fusion_gate_type
-        if args.fusion_gate_type == 'moe':
+        if args.fusion_gate_type in ('moe', 'dense'):
             config_kwargs['moe_num_experts'] = args.moe_num_experts
             config_kwargs['moe_expert_hidden_dim'] = args.moe_expert_hidden_dim
             config_kwargs['moe_top_k'] = args.moe_top_k
             config_kwargs['moe_use_load_balancing'] = args.moe_use_load_balancing
             config_kwargs['moe_load_balance_weight'] = args.moe_load_balance_weight
 
-    if args.purified_content_path is not None:
-        config_kwargs['purified_content_path'] = args.purified_content_path
-    if args.purified_collab_path is not None:
-        config_kwargs['purified_collab_path'] = args.purified_collab_path
-    
     # NEW FEATURES: Structural Improvements
     if args.use_dynamic_batching:
         config_kwargs['use_dynamic_batching'] = True
@@ -472,14 +490,33 @@ def _build_config_kwargs(args) -> dict:
             config_kwargs['tau_max'] = args.tau_max
         if args.tau_start_layer is not None:
             config_kwargs['tau_start_layer'] = args.tau_start_layer
-    
+
+    # Feature 8: Purified Semantic Predictor
+    if args.use_purified_predictor:
+        config_kwargs['use_purified_predictor'] = True
+        config_kwargs['purified_predictor_weight'] = args.purified_predictor_weight
+
+    # Stage 1 path overrides (for hyperparameter sweep)
+    if args.semantic_mapping_path is not None:
+        config_kwargs['semantic_mapping_path'] = args.semantic_mapping_path
+    if args.purified_content_path is not None:
+        config_kwargs['purified_content_path'] = args.purified_content_path
+    if args.purified_collab_path is not None:
+        config_kwargs['purified_collab_path'] = args.purified_collab_path
+    if args.purified_dim is not None:
+        config_kwargs['purified_dim'] = args.purified_dim
+
     return config_kwargs
 
 
 def main():
     """Main training function."""
     args = parse_args()
-    
+
+    # Enable TF32 for faster matmul/conv on Ampere+ GPUs (zero accuracy loss)
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+
     # Check if resuming from checkpoint
     if args.resume:
         # Load checkpoint to extract config
