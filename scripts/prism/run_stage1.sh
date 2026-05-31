@@ -13,7 +13,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 # ── Editable config ──────────────────────────────────────────────────────
-STAGE1_OUTPUT="${STAGE1_OUTPUT:-hparam_stage1}"
+STAGE1_OUTPUT="${STAGE1_OUTPUT:-hparam_stage1_legacy}"
 GPUS="${GPUS:-}"
 # ──────────────────────────────────────────────────────────────────────────
 

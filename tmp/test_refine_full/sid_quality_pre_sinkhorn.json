@@ -1,0 +1,42 @@
+{
+  "n_items": 12101,
+  "n_layers": 3,
+  "unique_ids": 229,
+  "unique_rate": 0.018924055863151806,
+  "collision_groups": 159,
+  "items_in_collisions": 12031,
+  "items_in_collision_rate": 0.9942153541029667,
+  "max_collision_size": 1641,
+  "prefix_unique_rate": {
+    "L1": 8.263779852904718e-05,
+    "L2": 0.0019006693661680852,
+    "L3": 0.018924055863151806
+  },
+  "code_usage_rate": {
+    "L1": 0.00390625,
+    "L2": 0.08984375,
+    "L3": 0.47265625
+  },
+  "knn_l1": 1.0,
+  "knn_l12": 0.9423828125,
+  "knn_z_l1": 1.0,
+  "knn_z_l12": 0.5445312261581421,
+  "sequence_prefix_hit_rate": {
+    "train": {
+      "n_samples": 20000,
+      "avg_max_prefix_depth": 2.08645,
+      "avg_max_prefix_depth_norm": 0.6954833333333333,
+      "L1_prefix_hit": 1.0,
+      "L2_prefix_hit": 0.7058,
+      "L3_prefix_hit": 0.38065
+    },
+    "valid": {
+      "n_samples": 20000,
+      "avg_max_prefix_depth": 2.02865,
+      "avg_max_prefix_depth_norm": 0.6762166666666667,
+      "L1_prefix_hit": 1.0,
+      "L2_prefix_hit": 0.68325,
+      "L3_prefix_hit": 0.3454
+    }
+  }
+}

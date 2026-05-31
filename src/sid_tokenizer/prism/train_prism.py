@@ -74,9 +74,17 @@ class PRISMTrainer:
 
     def setup_logging(self):
         log_level = getattr(logging, self.config.get('log_level', 'INFO'))
+        # Suppress root logger and sub-module loggers to prevent duplicate output
+        logging.getLogger().handlers.clear()
+        logging.getLogger().setLevel(logging.WARNING)
+        for sub in ['SinkhornReassigner']:
+            logging.getLogger(sub).handlers.clear()
+            logging.getLogger(sub).setLevel(logging.WARNING)
+
         self.logger = logging.getLogger('PRISMTrainer')
         self.logger.setLevel(log_level)
         self.logger.handlers.clear()
+        self.logger.propagate = False
 
         log_file = self.output_dir / 'training.log'
         file_handler = logging.FileHandler(log_file)
@@ -924,11 +932,10 @@ class PRISMTrainer:
 
     def _analyze_embedding_quality(self):
         """Deep embedding quality analysis — norms, variance, codebook stats."""
-        # Best model already loaded by export_purified_embeddings()
         self.model.eval()
         all_z, all_zc, all_ht, all_hc, all_zq = [], [], [], [], []
         with torch.no_grad():
-            for batch in self.item_eval_loader:
+            for batch in self.train_loader:
                 ce = batch['content_emb'].to(self.device)
                 cole = batch['collab_emb'].to(self.device)
                 enc = self.model.encode(ce, cole)
@@ -946,11 +953,11 @@ class PRISMTrainer:
 
         self.logger.info("=" * 70)
         self.logger.info("DEEP EMBEDDING QUALITY ANALYSIS")
-        self.logger.info("[1] Pre-encoder: z_clean={:.2f}±{:.2f} h_t={:.2f} h_c={:.2f} zc_inter_cos={:.4f} zc_neg%={:.1f}".format(
+        self.logger.info("[1] Pre-encoder: z_clean={:.2f}+/-{:.2f} h_t={:.2f} h_c={:.2f} zc_inter_cos={:.4f} zc_neg%={:.1f}".format(
             zc.norm(dim=-1).mean(), zc.norm(dim=-1).std(), ht.norm(dim=-1).mean(), hc.norm(dim=-1).mean(),
             sim_zc[mask].mean(), (sim_zc[mask]<0).float().mean()*100))
-        self.logger.info("[2] Latent z: norm={:.2f}±{:.2f} var={:.2f} dim_std={:.3f} inter_cos={:.4f} neg%={:.1f} ratio={:.2f}".format(
-            z.norm(dim=-1).mean(), z.norm(dim=-1).std(), z.var(dim=0).sum(), z.std(dim=0).mean(),
+        self.logger.info("[2] Latent z: norm={:.2f}+/-{:.2f} var={:.2f} inter_cos={:.4f} neg%={:.1f} ratio={:.2f}".format(
+            z.norm(dim=-1).mean(), z.norm(dim=-1).std(), z.var(dim=0).sum(),
             sim_z[mask].mean(), (sim_z[mask]<0).float().mean()*100, (z.norm(dim=-1).mean()/zc.norm(dim=-1).mean())))
         self.logger.info("[3] Quantized: zq_norm={:.2f} commit|z-zq|={:.3f} commit_ratio={:.3f}".format(
             zq.norm(dim=-1).mean(), commit.mean(), commit.mean()/z.norm(dim=-1).mean()))
@@ -959,12 +966,15 @@ class PRISMTrainer:
             cn = cb.norm(dim=-1); dead = (cn < 1e-4).sum().item()
             cb_sim = torch.nn.functional.cosine_similarity(cb.unsqueeze(1), cb.unsqueeze(0), dim=-1)
             cbm = ~torch.eye(len(cb), dtype=torch.bool)
-            self.logger.info("[4] Codebook L{}: norm={:.2f}±{:.2f} dead={} inter_cos={:.4f}".format(
+            self.logger.info("[4] Codebook L{}: norm={:.2f}+/-{:.2f} dead={} inter_cos={:.4f}".format(
                 li+1, cn.mean(), cn.std(), dead, cb_sim[cbm].mean()))
-        enc_mod = self.model.encoder.encoder; dec_mod = self.model.decoder.shared_decoder
-        self.logger.info("[5] Encoder W: L0={:.2f} Llast={:.2f} | Decoder W: L0={:.2f} Llast={:.2f}".format(
-            enc_mod[0].weight.data.norm(), enc_mod[-1].weight.data.norm() if hasattr(enc_mod[-1], 'weight') else 0,
-            dec_mod[0].weight.data.norm(), dec_mod[-1].weight.data.norm() if hasattr(dec_mod[-1], 'weight') else 0))
+        # Encoder/Decoder weight norms — OLD structure: self.model.encoder.encoder (MLP), self.model.decoder (Sequential)
+        enc_layers = list(self.model.encoder.encoder)
+        dec_layers = list(self.model.decoder.shared_decoder) if hasattr(self.model.decoder, 'shared_decoder') else []
+        if dec_layers:
+            self.logger.info("[5] Weights: enc_first={:.2f} enc_last={:.2f} dec_first={:.2f} dec_last={:.2f}".format(
+                enc_layers[0].weight.data.norm(), enc_layers[-1].weight.data.norm() if hasattr(enc_layers[-1], 'weight') else 0,
+                dec_layers[0].weight.data.norm(), dec_layers[-1].weight.data.norm() if hasattr(dec_layers[-1], 'weight') else 0))
         self.logger.info("=" * 70)
 
 

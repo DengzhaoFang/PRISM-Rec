@@ -1,0 +1,141 @@
+Configuration: {
+  "data_path": "dataset/Amazon-Beauty/processed/beauty-tiger-sentenceT5base/Beauty",
+  "output_dir": "tmp/cma_rgcp_smoke",
+  "max_items": 256,
+  "n_layers": 3,
+  "n_embed": 256,
+  "n_embed_per_layer": [
+    32,
+    32,
+    32
+  ],
+  "latent_dim": 8,
+  "content_dim": 768,
+  "collab_dim": 64,
+  "use_ide": true,
+  "ide_dim": 32,
+  "lambda_cma": 0.05,
+  "cma_temperature": 0.07,
+  "cma_warmup_epochs": 2,
+  "cma_ramp_epochs": 2,
+  "use_rgcp": true,
+  "rgcp_hidden_dim": 128,
+  "lambda_rgcp_reliability_balance": 0.01,
+  "lambda_rgcp_reliability_variance": 0.01,
+  "lambda_rgcp_anchor": 0.01,
+  "lambda_rgcp_recommendation": 0.05,
+  "rgcp_temperature": 0.07,
+  "rgcp_rec_max_samples": 512,
+  "rgcp_rec_batch_size": 16,
+  "rgcp_max_history": 5,
+  "epochs": 3,
+  "batch_size": 64,
+  "learning_rate": 0.0001,
+  "weight_decay": 0.0001,
+  "grad_clip": 1.0,
+  "grad_log_interval": 50,
+  "beta": 0.25,
+  "use_ema": true,
+  "ema_decay": 0.99,
+  "quantize_mode": "rotation",
+  "use_scheduler": false,
+  "scheduler_type": "warmup_cosine",
+  "warmup_ratio": 0.1,
+  "early_stop_patience": 5,
+  "early_stop_min_delta": 1e-05,
+  "early_stop_cooldown": 3,
+  "early_stop_warmup_epochs": 5,
+  "early_stop_min_epochs": 1,
+  "sid_eval_interval": 3,
+  "checkpoint_loss_tolerance": 0.03,
+  "perplexity_collapse_patience": 3,
+  "perplexity_collapse_ratio": 0.35,
+  "no_hierarchical_kmeans_init": false,
+  "kmeans_init_samples": 8192,
+  "kmeans_batch_size": 1024,
+  "kmeans_random_state": 42,
+  "codebook_reset_interval": 200,
+  "save_every": 3,
+  "device": "cpu",
+  "num_workers": 0,
+  "log_level": "INFO",
+  "resume": null,
+  "skip_sinkhorn": true,
+  "no_tqdm": true,
+  "use_tqdm": false
+}
+Loading dataset...
+Dataset: 256 items, 4 batches
+RGCP recommendation supervision enabled with 2 train sequences
+Params: 520,620  IDE=ON
+  Codebook L1: 32
+  Codebook L2: 32
+  Codebook L3: 32
+K-means init with 256 samples...
+  L1: k-means done (inertia=42.3957)
+  L2: k-means done (inertia=16.0145)
+  L3: k-means done (inertia=5.9802)
+Loss: UPR + 0.25*commit + 0.05*CMA(pre-RGCP) + RGCP
+============================================================
+STARTING TRAINING
+============================================================
+
+Epoch 1 Summary:
+  Train: Total=1.1682 UPR=1.1027 Commit=0.0804 RGCP-rel=0.0002 RGCP-anchor=0.0124 RGCP-rec=0.0328
+    L1: 19/256 codes, entropy=0.965
+    L2: 23/256 codes, entropy=0.983
+    L3: 26/256 codes, entropy=0.986
+    RGCP Reliability: train=0.0002
+    RGCP Anchor: train=0.0124
+    RGCP Recommendation: train=0.0328
+    RGCP Gate Stats: r_t=0.533 r_c=0.468 var=0.0009 shift=0.0260
+    codebook: 0.0000
+    decoder: 0.9501
+    encoder: 0.3915
+    ide: 0.4506
+  Val: Total=0.9610 UPR=0.9028  qMSE L1=0.0637 L2=0.0342 L3=0.0185
+  New best recon: 0.9028
+
+Epoch 2 Summary:
+  Train: Total=0.9738 UPR=0.9118 Commit=0.1282 RGCP-rel=0.0002 RGCP-anchor=0.0124 RGCP-rec=0.0173
+    L1: 6/256 codes, entropy=0.936
+    L2: 18/256 codes, entropy=0.972
+    L3: 20/256 codes, entropy=0.979
+    RGCP Reliability: train=0.0002
+    RGCP Anchor: train=0.0124
+    RGCP Recommendation: train=0.0173
+    RGCP Gate Stats: r_t=0.541 r_c=0.455 var=0.0009 shift=0.0258
+  Val: Total=0.8358 UPR=0.7936  qMSE L1=0.0476 L2=0.0234 L3=0.0132
+  New best recon: 0.7936
+
+Epoch 3 Summary:
+  Train: Total=0.9906 UPR=0.8203 Commit=0.1018 RGCP-rel=0.0002 RGCP-anchor=0.0125 RGCP-rec=0.0108
+    L1: 6/256 codes, entropy=0.913
+    L2: 22/256 codes, entropy=0.978
+    L3: 25/256 codes, entropy=0.987
+    CMA Loss: train=4.8592 val=3.8607
+    CMA Weight: train=0.0250
+    RGCP Reliability: train=0.0002
+    RGCP Anchor: train=0.0125
+    RGCP Recommendation: train=0.0108
+    RGCP Gate Stats: r_t=0.543 r_c=0.444 var=0.0009 shift=0.0255
+  Val: Total=0.8503 UPR=0.7314  qMSE L1=0.0249 L2=0.0131 L3=0.0068
+  New best recon: 0.7314
+  [SID-FULL] unique=67.19%  collisions=48  L1_pref=2.34%  L2_pref=17.58%  L3_pref=67.19%  kNN-L12=0.485  useL1=18.8%  useL2=84.4%
+  New best checkpoint: epoch=3 unique=67.19% L2_pref=17.58%
+Training done. Best recon=0.7314 best_checkpoint_epoch=3
+Saved 256 item mappings
+
+Semantic IDs: 256 items, 172 unique (67.19%)
+  Collisions: 48 groups, 132 items
+  Layer 1: 6 unique prefixes (2.34%)
+  Layer 2: 45 unique prefixes (17.58%)
+  Layer 3: 172 unique prefixes (67.19%)
+  Codebook 1: 6/32 used (18.8%)
+  Codebook 2: 27/32 used (84.4%)
+  Codebook 3: 32/32 used (100.0%)
+  kNN SID consistency (z_q): L1=0.748 L12=0.485
+  kNN SID consistency (z):   L1=0.633 L12=0.221
+  Sequence SID consistency (train): L1=0.764 L2=0.209 L3=0.018 depth=0.99
+  Sequence SID consistency (valid): L1=0.681 L2=0.143 L3=0.042 depth=0.87
+Features exported: 256 items

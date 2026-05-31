@@ -1,0 +1,23 @@
+{
+  "before": {
+    "total_items": 12101,
+    "unique_ids": 5847,
+    "uniqueness_rate": 0.4831832079993389,
+    "collision_groups": 2294,
+    "items_in_collisions": 8548
+  },
+  "after": {
+    "total_items": 12101,
+    "unique_ids": 12101,
+    "uniqueness_rate": 1.0,
+    "collision_groups": 0,
+    "items_in_collisions": 0
+  },
+  "improvement": {
+    "unique_ids_improvement": 6254,
+    "uniqueness_rate_improvement": 0.5168167920006611,
+    "collision_groups_reduced": 2294,
+    "items_in_collisions_reduced": 8548,
+    "achieved_100_percent": true
+  }
+}

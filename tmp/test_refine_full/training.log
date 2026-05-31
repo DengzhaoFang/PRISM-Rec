@@ -1,0 +1,184 @@
+Configuration: {
+  "data_path": "dataset/Amazon-Beauty/processed/beauty-tiger-sentenceT5base/Beauty",
+  "output_dir": "tmp/test_refine_full",
+  "max_items": null,
+  "n_layers": 3,
+  "n_embed": 256,
+  "n_embed_per_layer": [
+    256,
+    256,
+    256
+  ],
+  "latent_dim": 32,
+  "content_dim": 768,
+  "collab_dim": 64,
+  "use_ide": true,
+  "ide_dim": 128,
+  "use_cma": false,
+  "lambda_cma": 0.1,
+  "cma_temperature": 0.07,
+  "cma_warmup_epochs": 20,
+  "cma_ramp_epochs": 20,
+  "use_refinement": true,
+  "lambda_refine": 0.1,
+  "lambda_drift": 0.05,
+  "refine_contrastive": 0.1,
+  "refine_warmup_epochs": 2,
+  "refine_ramp_epochs": 2,
+  "refinement_layers": 2,
+  "teacher_dim": 256,
+  "teacher_path": null,
+  "epochs": 8,
+  "batch_size": 512,
+  "learning_rate": 0.0001,
+  "weight_decay": 0.0001,
+  "grad_clip": 1.0,
+  "grad_log_interval": 50,
+  "beta": 0.25,
+  "use_ema": true,
+  "ema_decay": 0.99,
+  "quantize_mode": "rotation",
+  "use_scheduler": true,
+  "scheduler_type": "warmup_cosine",
+  "warmup_ratio": 0.1,
+  "early_stop_patience": 50,
+  "early_stop_min_delta": 1e-05,
+  "early_stop_cooldown": 3,
+  "early_stop_warmup_epochs": 5,
+  "early_stop_min_epochs": 150,
+  "sid_eval_interval": 4,
+  "checkpoint_loss_tolerance": 0.03,
+  "perplexity_collapse_patience": 3,
+  "perplexity_collapse_ratio": 0.35,
+  "no_hierarchical_kmeans_init": false,
+  "kmeans_init_samples": 8192,
+  "kmeans_batch_size": 1024,
+  "kmeans_random_state": 42,
+  "codebook_reset_interval": 200,
+  "save_every": 50,
+  "device": "cuda",
+  "num_workers": 4,
+  "log_level": "INFO",
+  "resume": null,
+  "skip_sinkhorn": false,
+  "no_tqdm": true,
+  "use_tqdm": false
+}
+Loading dataset...
+Dataset: 12101 items, 24 batches
+Params: 1,428,898  IDE+RGCMR
+  Codebook L1: 256
+  Codebook L2: 256
+  Codebook L3: 256
+K-means init with 8192 samples...
+  L1: k-means done (inertia=10978.8926)
+  L2: k-means done (inertia=7118.4111)
+  L3: k-means done (inertia=4808.9434)
+Loss: UPR + 0.25*commit + 0.1*refine_ctx + 0.05*drift + + 0.1*CMA
+============================================================
+STARTING TRAINING
+============================================================
+
+Epoch 1 Summary:
+  Train: Total=0.2389 UPR=0.2114 Commit=0.1099
+    L1: 101/256 codes, entropy=0.976
+    L2: 186/256 codes, entropy=0.995
+    L3: 201/256 codes, entropy=0.996
+    codebook: 0.0000
+    decoder: 0.0447
+    encoder: 0.0142
+    ide: 0.0057
+    refine: 0.0059
+  Val: Total=0.2555 UPR=0.0861  qMSE L1=0.0108 L2=0.0108 L3=0.0093
+  New best recon: 0.0861
+
+Epoch 2 Summary:
+  Train: Total=0.1093 UPR=0.0952 Commit=0.0562
+    L1: 12/256 codes, entropy=0.950
+    L2: 179/256 codes, entropy=0.993
+    L3: 198/256 codes, entropy=0.996
+  Val: Total=0.2128 UPR=0.0504  qMSE L1=0.0041 L2=0.0064 L3=0.0063
+  New best recon: 0.0504
+
+Epoch 3 Summary:
+  Train: Total=0.1666 UPR=0.0784 Commit=0.0424 Refine(ctx=1.4985 drift=0.0533 cos=0.142)
+    L1: 8/256 codes, entropy=0.921
+    L2: 160/256 codes, entropy=0.989
+    L3: 193/256 codes, entropy=0.995
+    codebook: 0.0000
+    decoder: 0.0033
+    encoder: 0.0014
+    ide: 0.0008
+    refine: 0.0016
+  Val: Total=0.1908 UPR=0.0501  qMSE L1=0.0026 L2=0.0040 L3=0.0042
+  New best recon: 0.0501
+
+Epoch 4 Summary:
+  Train: Total=0.2187 UPR=0.0757 Commit=0.0382 Refine(ctx=1.3080 drift=0.0532 cos=0.380)
+    L1: 6/256 codes, entropy=0.891
+    L2: 149/256 codes, entropy=0.983
+    L3: 189/256 codes, entropy=0.993
+  Val: Total=0.1671 UPR=0.0459  qMSE L1=0.0027 L2=0.0034 L3=0.0035
+  New best recon: 0.0459
+  [SID-FULL] unique=1.89%  collisions=159  L1_pref=0.01%  L2_pref=0.19%  L3_pref=1.89%  kNN-L12=0.945  useL1=0.4%  useL2=9.0%
+  New best checkpoint: epoch=4 unique=1.89% L2_pref=0.19%
+
+Epoch 5 Summary:
+  Train: Total=0.1966 UPR=0.0662 Commit=0.0345 Refine(ctx=1.1906 drift=0.0533 cos=0.528)
+    L1: 6/256 codes, entropy=0.856
+    L2: 152/256 codes, entropy=0.979
+    L3: 188/256 codes, entropy=0.992
+    codebook: 0.0000
+    decoder: 0.0059
+    encoder: 0.0010
+    ide: 0.0003
+    refine: 0.0014
+  Val: Total=0.1500 UPR=0.0361  qMSE L1=0.0018 L2=0.0029 L3=0.0029
+  New best recon: 0.0361
+
+Epoch 6 Summary:
+  Train: Total=0.1848 UPR=0.0592 Commit=0.0303 Refine(ctx=1.1535 drift=0.0535 cos=0.574)
+    L1: 6/256 codes, entropy=0.815
+    L2: 152/256 codes, entropy=0.975
+    L3: 187/256 codes, entropy=0.990
+  Val: Total=0.1436 UPR=0.0322  qMSE L1=0.0014 L2=0.0026 L3=0.0026
+  New best recon: 0.0322
+
+Epoch 7 Summary:
+  Train: Total=0.1805 UPR=0.0566 Commit=0.0280 Refine(ctx=1.1418 drift=0.0535 cos=0.589)
+    L1: 6/256 codes, entropy=0.770
+    L2: 154/256 codes, entropy=0.971
+    L3: 187/256 codes, entropy=0.988
+    codebook: 0.0000
+    decoder: 0.0023
+    encoder: 0.0008
+    ide: 0.0002
+    refine: 0.0009
+  Val: Total=0.1413 UPR=0.0309  qMSE L1=0.0012 L2=0.0024 L3=0.0022
+  New best recon: 0.0309
+
+Epoch 8 Summary:
+  Train: Total=0.1788 UPR=0.0557 Commit=0.0270 Refine(ctx=1.1372 drift=0.0535 cos=0.594)
+    L1: 6/256 codes, entropy=0.723
+    L2: 161/256 codes, entropy=0.970
+    L3: 188/256 codes, entropy=0.987
+  Val: Total=0.1407 UPR=0.0306  qMSE L1=0.0010 L2=0.0022 L3=0.0021
+  New best recon: 0.0306
+  [SID-FULL] unique=1.06%  collisions=98  L1_pref=0.01%  L2_pref=0.17%  L3_pref=1.06%  kNN-L12=0.962  useL1=0.4%  useL2=7.8%
+Training done. Best recon=0.0306 best_checkpoint_epoch=4
+Saved 12101 item mappings
+
+Semantic IDs: 12101 items, 229 unique (1.89%)
+  Collisions: 159 groups, 12031 items
+  Layer 1: 1 unique prefixes (0.01%)
+  Layer 2: 23 unique prefixes (0.19%)
+  Layer 3: 229 unique prefixes (1.89%)
+  Codebook 1: 1/256 used (0.4%)
+  Codebook 2: 23/256 used (9.0%)
+  Codebook 3: 121/256 used (47.3%)
+  kNN SID consistency (z_q): L1=1.000 L12=0.942
+  kNN SID consistency (z):   L1=1.000 L12=0.545
+  Sequence SID consistency (train): L1=1.000 L2=0.706 L3=0.381 depth=2.09
+  Sequence SID consistency (valid): L1=1.000 L2=0.683 L3=0.345 depth=2.03
+Sinkhorn: 100% uniqueness!
+Features exported: 12101 items, h_t=128D, h_c=128D

@@ -1,0 +1,74 @@
+Loading item embeddings from item_emb.parquet...
+Loading collaborative embeddings from lightgcn/item_embeddings_collab.npy...
+Loaded teacher prototypes: torch.Size([12101, 256])
+Dataset loaded: 12101 items
+  Content embedding dim: 768
+  Collab embedding dim: 64
+2026-05-30 13:22:08,574 - SinkhornReassigner - INFO - Loading semantic IDs from tmp/test_refine_full/semantic_id_mappings.json...
+2026-05-30 13:22:08,606 - SinkhornReassigner - INFO -   ✓ Loaded 12101 items with 3 layers from JSON
+2026-05-30 13:22:08,607 - SinkhornReassigner - INFO - Loading model for semantic distance computation...
+2026-05-30 13:22:09,678 - SinkhornReassigner - INFO -   ✓ Model loaded
+2026-05-30 13:22:09,679 - SinkhornReassigner - INFO - ✓ Sinkhorn ID Reassigner initialized
+2026-05-30 13:22:09,679 - SinkhornReassigner - INFO - ================================================================================
+2026-05-30 13:22:09,679 - SinkhornReassigner - INFO - Sinkhorn-based ID Reassignment
+2026-05-30 13:22:09,679 - SinkhornReassigner - INFO - ================================================================================
+2026-05-30 13:22:09,679 - SinkhornReassigner - INFO - Starting ID reassignment (iterative until 100% unique)...
+2026-05-30 13:22:09,679 - SinkhornReassigner - INFO -   Codebook sizes: [256, 256, 256]
+2026-05-30 13:22:09,679 - SinkhornReassigner - INFO - 
+  Iteration 1/10:
+2026-05-30 13:22:10,075 - SinkhornReassigner - INFO -   Found 159 collision groups (12031 items)
+Loading item embeddings from item_emb.parquet...
+Loading collaborative embeddings from lightgcn/item_embeddings_collab.npy...
+Dataset loaded: 12101 items
+  Content embedding dim: 768
+  Collab embedding dim: 64
+  Reassigning iteration 1:   0%|          | 0/159 [00:00<?, ?it/s]2026-05-30 13:22:36,645 - SinkhornReassigner - WARNING -   884 items failed Sinkhorn assignment, using fallback
+  Reassigning iteration 1:   1%|          | 1/159 [00:26<1:09:59, 26.58s/it]2026-05-30 13:23:09,304 - SinkhornReassigner - WARNING -   755 items failed Sinkhorn assignment, using fallback
+  Reassigning iteration 1:   1%|▏         | 2/159 [00:59<1:18:54, 30.15s/it]2026-05-30 13:23:26,165 - SinkhornReassigner - WARNING -   357 items failed Sinkhorn assignment, using fallback
+  Reassigning iteration 1:   2%|▏         | 3/159 [01:16<1:02:36, 24.08s/it]2026-05-30 13:23:37,820 - SinkhornReassigner - WARNING -   344 items failed Sinkhorn assignment, using fallback
+  Reassigning iteration 1:   3%|▎         | 4/159 [01:27<49:32, 19.18s/it]  2026-05-30 13:23:43,467 - SinkhornReassigner - WARNING -   65 items failed Sinkhorn assignment, using fallback
+  Reassigning iteration 1:   3%|▎         | 5/159 [01:33<36:41, 14.30s/it]2026-05-30 13:23:48,553 - SinkhornReassigner - WARNING -   51 items failed Sinkhorn assignment, using fallback
+  Reassigning iteration 1:   4%|▍         | 6/159 [01:38<28:28, 11.16s/it]  Reassigning iteration 1:   4%|▍         | 7/159 [01:41<21:39,  8.55s/it]  Reassigning iteration 1:   5%|▌         | 8/159 [01:44<17:08,  6.81s/it]  Reassigning iteration 1:   6%|▌         | 9/159 [01:47<13:46,  5.51s/it]  Reassigning iteration 1:   6%|▋         | 10/159 [01:49<11:04,  4.46s/it]  Reassigning iteration 1:   7%|▋         | 11/159 [01:50<08:38,  3.50s/it]  Reassigning iteration 1:   8%|▊         | 12/159 [01:52<06:56,  2.84s/it]  Reassigning iteration 1:   8%|▊         | 13/159 [01:53<05:35,  2.30s/it]  Reassigning iteration 1:   9%|▉         | 14/159 [01:53<04:22,  1.81s/it]  Reassigning iteration 1:   9%|▉         | 15/159 [01:54<03:32,  1.47s/it]  Reassigning iteration 1:  10%|█         | 16/159 [01:55<02:48,  1.18s/it]  Reassigning iteration 1:  11%|█         | 17/159 [01:55<02:17,  1.03it/s]  Reassigning iteration 1:  11%|█▏        | 18/159 [01:56<01:55,  1.22it/s]  Reassigning iteration 1:  12%|█▏        | 19/159 [01:56<01:28,  1.58it/s]  Reassigning iteration 1:  13%|█▎        | 20/159 [01:56<01:09,  2.00it/s]  Reassigning iteration 1:  13%|█▎        | 21/159 [01:56<00:55,  2.49it/s]  Reassigning iteration 1:  14%|█▍        | 22/159 [01:56<00:44,  3.09it/s]  Reassigning iteration 1:  14%|█▍        | 23/159 [01:56<00:35,  3.81it/s]  Reassigning iteration 1:  15%|█▌        | 24/159 [01:56<00:29,  4.52it/s]  Reassigning iteration 1:  16%|█▌        | 25/159 [01:57<00:25,  5.20it/s]  Reassigning iteration 1:  16%|█▋        | 26/159 [01:57<00:22,  6.02it/s]  Reassigning iteration 1:  18%|█▊        | 28/159 [01:57<00:16,  7.71it/s]  Reassigning iteration 1:  19%|█▉        | 30/159 [01:57<00:13,  9.34it/s]  Reassigning iteration 1:  20%|██        | 32/159 [01:57<00:11, 10.94it/s]  Reassigning iteration 1:  21%|██▏       | 34/159 [01:57<00:09, 12.67it/s]  Reassigning iteration 1:  23%|██▎       | 36/159 [01:57<00:08, 14.11it/s]  Reassigning iteration 1:  25%|██▍       | 39/159 [01:57<00:07, 16.75it/s]  Reassigning iteration 1:  26%|██▋       | 42/159 [01:58<00:06, 19.37it/s]  Reassigning iteration 1:  29%|██▉       | 46/159 [01:58<00:04, 23.10it/s]  Reassigning iteration 1:  31%|███▏      | 50/159 [01:58<00:04, 26.14it/s]  Reassigning iteration 1:  34%|███▍      | 54/159 [01:58<00:03, 29.24it/s]  Reassigning iteration 1:  37%|███▋      | 59/159 [01:58<00:03, 33.25it/s]  Reassigning iteration 1:  40%|████      | 64/159 [01:58<00:02, 36.06it/s]  Reassigning iteration 1:  43%|████▎     | 69/159 [01:58<00:02, 39.22it/s]  Reassigning iteration 1:  47%|████▋     | 75/159 [01:58<00:01, 43.14it/s]  Reassigning iteration 1:  51%|█████     | 81/159 [01:59<00:01, 47.14it/s]  Reassigning iteration 1:  55%|█████▍    | 87/159 [01:59<00:01, 50.54it/s]  Reassigning iteration 1:  59%|█████▉    | 94/159 [01:59<00:01, 54.03it/s]  Reassigning iteration 1:  64%|██████▎   | 101/159 [01:59<00:01, 57.68it/s]  Reassigning iteration 1:  68%|██████▊   | 108/159 [01:59<00:00, 60.43it/s]  Reassigning iteration 1:  73%|███████▎  | 116/159 [01:59<00:00, 64.03it/s]  Reassigning iteration 1:  78%|███████▊  | 124/159 [01:59<00:00, 68.18it/s]  Reassigning iteration 1:  83%|████████▎ | 132/159 [01:59<00:00, 71.28it/s]  Reassigning iteration 1:  88%|████████▊ | 140/159 [01:59<00:00, 70.31it/s]  Reassigning iteration 1:  93%|█████████▎| 148/159 [02:00<00:00, 66.13it/s]  Reassigning iteration 1:  97%|█████████▋| 155/159 [02:00<00:00, 66.39it/s]                                                                            2026-05-30 13:24:10,252 - SinkhornReassigner - INFO -   Reassigned 11872 items in this iteration
+2026-05-30 13:24:10,278 - SinkhornReassigner - INFO -   Current uniqueness: 12101/12101 (100.00%)
+2026-05-30 13:24:10,278 - SinkhornReassigner - INFO -   ✓ 100% uniqueness achieved!
+2026-05-30 13:24:10,302 - SinkhornReassigner - INFO -   ✓ Final uniqueness: 12101/12101 (100%)
+2026-05-30 13:24:10,302 - SinkhornReassigner - INFO - 
+  Total items reassigned: 11872
+2026-05-30 13:24:10,308 - SinkhornReassigner - INFO - Saving reassigned IDs...
+2026-05-30 13:24:10,403 - SinkhornReassigner - INFO -   ✓ Saved: tmp/test_refine_full/semantic_id_mappings.json
+2026-05-30 13:24:10,404 - SinkhornReassigner - INFO -   ✓ Saved: tmp/test_refine_full/semantic_ids.npy
+2026-05-30 13:24:10,404 - SinkhornReassigner - INFO - 
+================================================================================
+2026-05-30 13:24:10,404 - SinkhornReassigner - INFO - Before/After Sinkhorn Reassignment Analysis
+2026-05-30 13:24:10,404 - SinkhornReassigner - INFO - ================================================================================
+2026-05-30 13:24:10,435 - SinkhornReassigner - INFO - 
+📊 BEFORE Sinkhorn Reassignment:
+2026-05-30 13:24:10,435 - SinkhornReassigner - INFO -    Total items: 12101
+2026-05-30 13:24:10,435 - SinkhornReassigner - INFO -    Unique IDs: 229
+2026-05-30 13:24:10,435 - SinkhornReassigner - INFO -    Uniqueness rate: 0.0189 (1.89%)
+2026-05-30 13:24:10,435 - SinkhornReassigner - INFO -    Collision groups: 159
+2026-05-30 13:24:10,435 - SinkhornReassigner - INFO -    Items in collisions: 12031 (99.42%)
+2026-05-30 13:24:10,462 - SinkhornReassigner - INFO - 
+📊 AFTER Sinkhorn Reassignment:
+2026-05-30 13:24:10,462 - SinkhornReassigner - INFO -    Total items: 12101
+2026-05-30 13:24:10,462 - SinkhornReassigner - INFO -    Unique IDs: 12101
+2026-05-30 13:24:10,462 - SinkhornReassigner - INFO -    Uniqueness rate: 1.0000 (100.00%)
+2026-05-30 13:24:10,462 - SinkhornReassigner - INFO -    Collision groups: 0
+2026-05-30 13:24:10,462 - SinkhornReassigner - INFO -    Items in collisions: 0 (0.00%)
+2026-05-30 13:24:10,462 - SinkhornReassigner - INFO - 
+📈 IMPROVEMENT:
+2026-05-30 13:24:10,462 - SinkhornReassigner - INFO -    Unique IDs improvement: +11872
+2026-05-30 13:24:10,463 - SinkhornReassigner - INFO -    Uniqueness rate improvement: +0.9811 (98.11%)
+2026-05-30 13:24:10,463 - SinkhornReassigner - INFO -    Collision groups reduced: 159
+2026-05-30 13:24:10,463 - SinkhornReassigner - INFO -    Items in collisions reduced: 12031
+2026-05-30 13:24:10,463 - SinkhornReassigner - INFO - 
+   ✅ 100% uniqueness achieved!
+2026-05-30 13:24:10,463 - SinkhornReassigner - INFO - 
+  ✓ Statistics saved: tmp/test_refine_full/reassignment_stats.json
+2026-05-30 13:24:10,463 - SinkhornReassigner - INFO - ================================================================================
+2026-05-30 13:24:10,466 - SinkhornReassigner - INFO - ================================================================================
+2026-05-30 13:24:10,466 - SinkhornReassigner - INFO - ✓ Reassignment completed!
+2026-05-30 13:24:10,466 - SinkhornReassigner - INFO - Output directory: tmp/test_refine_full
+2026-05-30 13:24:10,466 - SinkhornReassigner - INFO - ================================================================================
+2026-05-30 13:24:10,491 - PRISMTrainer - INFO - Sinkhorn: 100% uniqueness!
+2026-05-30 13:24:11,263 - PRISMTrainer - INFO - Features exported: 12101 items, h_t=128D, h_c=128D

@@ -1,0 +1,104 @@
+Configuration: {
+  "data_path": "dataset/Amazon-Beauty/processed/beauty-tiger-sentenceT5base/Beauty",
+  "output_dir": "tmp/prism_context_smoke",
+  "max_items": 256,
+  "n_layers": 2,
+  "n_embed": 16,
+  "n_embed_per_layer": [
+    16,
+    16
+  ],
+  "latent_dim": 16,
+  "content_dim": 768,
+  "collab_dim": 64,
+  "use_ide": true,
+  "ide_dim": 32,
+  "use_cma": false,
+  "use_reliability_gate": false,
+  "use_context_fusion": true,
+  "lambda_cma": 0.1,
+  "cma_temperature": 0.07,
+  "cma_warmup_epochs": 20,
+  "cma_ramp_epochs": 20,
+  "lambda_pref": 0.02,
+  "pref_warmup_epochs": 0,
+  "pref_ramp_epochs": 0,
+  "lambda_pop": 0.01,
+  "density_k": 20,
+  "context_window": 20,
+  "context_fallback_k": 10,
+  "use_pcgrad": true,
+  "epochs": 1,
+  "batch_size": 64,
+  "learning_rate": 0.0001,
+  "weight_decay": 0.0001,
+  "grad_clip": 1.0,
+  "grad_log_interval": 50,
+  "beta": 0.25,
+  "use_ema": true,
+  "ema_decay": 0.99,
+  "quantize_mode": "rotation",
+  "use_scheduler": false,
+  "scheduler_type": "warmup_cosine",
+  "warmup_ratio": 0.1,
+  "early_stop_patience": 5,
+  "early_stop_min_delta": 1e-05,
+  "early_stop_cooldown": 3,
+  "early_stop_warmup_epochs": 5,
+  "early_stop_min_epochs": 1,
+  "early_stop_metric": "total_loss",
+  "sid_eval_interval": 1,
+  "perplexity_collapse_patience": 3,
+  "perplexity_collapse_ratio": 0.35,
+  "no_hierarchical_kmeans_init": false,
+  "kmeans_init_samples": 8192,
+  "kmeans_batch_size": 1024,
+  "kmeans_random_state": 42,
+  "codebook_reset_interval": 200,
+  "save_every": 1,
+  "device": "cpu",
+  "num_workers": 0,
+  "log_level": "INFO",
+  "resume": null,
+  "skip_sinkhorn": true,
+  "no_tqdm": true,
+  "use_tqdm": false
+}
+Loading dataset...
+Dataset: 256 items, 4 batches
+Params: 516,692  IDE=ON
+  Codebook L1: 16
+  Codebook L2: 16
+K-means init with 256 samples...
+  L1: k-means done (inertia=185.7001)
+  L2: k-means done (inertia=122.8223)
+Loss: UPR + 0.25*commit + 0.02*CTX + 0.01*POP
+============================================================
+STARTING TRAINING
+============================================================
+
+Epoch 1 Summary:
+  Train: Total=1.1215 UPR=1.0878 Commit=0.1081 Pref=0.3248 Pop=0.0109 Gate=[0.427,0.573]
+    L1: 14/256 codes, entropy=0.986
+    L2: 15/256 codes, entropy=0.997
+    codebook: 0.0000
+    decoder: 0.7469
+    encoder: 0.1098
+    ide: 0.0540
+  Val: Total=1.0053 UPR=0.9555  qMSE L1=0.0540 L2=0.0393
+  New best objective: 1.0053
+  [SID-FULL] unique=17.97%  collisions=26  L1_pref=4.30%  L2_pref=17.97%  kNN-L12=0.754  useL1=68.8%  useL2=75.0%
+Training done. Best objective=1.0053
+Saved 256 item mappings
+
+Semantic IDs: 256 items, 46 unique (17.97%)
+  Collisions: 26 groups, 236 items
+  Layer 1: 11 unique prefixes (4.30%)
+  Layer 2: 46 unique prefixes (17.97%)
+  Codebook 1: 11/16 used (68.8%)
+  Codebook 2: 12/16 used (75.0%)
+  kNN SID consistency (z_q): L1=0.913 L12=0.754
+  kNN SID consistency (z):   L1=0.648 L12=0.298
+  Sequence SID consistency (train): L1=0.518 L2=0.236 depth=0.75
+  Sequence SID consistency (valid): L1=0.412 L2=0.151 depth=0.56
+Features exported: 256 items, h_t=32D, h_c=32D
