@@ -92,8 +92,8 @@ BASE_TRAIN_ARGS = [
     "--commit_weight", "0.0625",
     "--use_ema", "--ema_decay", "0.99", "--quantize_mode", "rotation",
     "--use_scheduler", "--scheduler_type", "warmup_cosine", "--warmup_ratio", "0.1",
-    "--early_stop_patience", "50", "--early_stop_min_delta", "1e-5",
-    "--early_stop_min_epochs", "500",
+    "--early_stop_patience", "30", "--early_stop_min_delta", "1e-5",
+    "--early_stop_cooldown", "3", "--early_stop_warmup_epochs", "5",
     "--perplexity_collapse_ratio", "0.35", "--perplexity_collapse_patience", "3",
     "--no_hierarchical_kmeans_init", "--kmeans_init_samples", "8192",
     "--save_every", "50", "--num_workers", "4", "--log_level", "INFO",
@@ -119,14 +119,10 @@ EXPERIMENT_NAME_ALIASES = {}
 # ═══════════════════════════════════════════════════════════════════════════════
 
 _EPOCH_RE = re.compile(r"Epoch (\d+) Summary:")
-_TRAIN_RE = re.compile(
-    r"Train: Total=([\d.]+) UPR=([\d.]+) Commit=([\d.]+)"
-)
-_REFINE_RE = re.compile(r"Refine\(ctx=([\d.]+) drift=([\d.]+)")
-_REFINE_COS_RE = re.compile(r"cos=([\d.\-]+)")
-_CODES_RE = re.compile(r"L(\d): ([\d.]+)/256 codes")
-_VAL_RE = re.compile(r"Val: Total=([\d.]+) UPR=([\d.]+)")
-_BEST_RE = re.compile(r"New best recon: ([\d.]+)")
+_TRAIN_RE = re.compile(r"Total Loss:\s+([\d.]+)")
+_UPR_RE = re.compile(r"UPR Loss:\s+([\d.]+)")
+_CODES_RE = re.compile(r"Perplexity Layer (\d): ([\d.]+)")
+_BEST_RE = re.compile(r"New best loss: ([\d.]+)")
 # Match OLD log format: "[2] Latent z: norm=5.35±0.29 var=15.40 ... inter_cos=0.4598 neg%=1.0"
 _LATENT_RE = re.compile(r"\[2\] Latent z: norm=([\d.]+).*var=([\d.]+).*inter_cos=([\d.]+).*neg%=([\d.]+)")
 
@@ -157,21 +153,12 @@ def parse_metrics_from_log(log_path: Path) -> Dict:
     m = _TRAIN_RE.search(block)
     if m:
         metrics["train_loss"] = float(m.group(1))
-        metrics["upr_loss"] = float(m.group(2))
-        metrics["commit_loss"] = float(m.group(3))
+    m = _UPR_RE.search(block)
+    if m:
+        metrics["upr_loss"] = float(m.group(1))
 
     for m in _CODES_RE.finditer(block):
         metrics[f"codes_l{m.group(1)}"] = int(m.group(2))
-
-    # refinement metrics
-    m = _REFINE_RE.search(block)
-    if m:
-        metrics["refine_ctx"] = float(m.group(1))
-        metrics["refine_drift"] = float(m.group(2))
-
-    m = _VAL_RE.search(block)
-    if m:
-        metrics["val_loss"] = float(m.group(1))
 
     # latent space analysis (post-training, full log scan)
     match = _LATENT_RE.search(text)
