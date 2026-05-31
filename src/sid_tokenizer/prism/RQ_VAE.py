@@ -94,6 +94,7 @@ class RQVAEQuantizer(nn.Module):
         
         # Track initialization state for k-means initialization
         self.register_buffer('_initialized', torch.tensor(False))
+        self.register_buffer('code_usage', torch.zeros(n_embed))
         
     def _kmeans_init(self, z: torch.Tensor):
         """
@@ -103,11 +104,25 @@ class RQVAEQuantizer(nn.Module):
         Args:
             z: First batch of input embeddings (batch_size, embed_dim)
         """
+        n_samples = z.shape[0]
+        if n_samples < self.n_embed:
+            print(f"  Warning: n_samples={n_samples} < n_embed={self.n_embed}, "
+                  f"using random init with xavier_uniform")
+            with torch.no_grad():
+                if self.use_ema:
+                    nn.init.xavier_uniform_(self.embedding.data)
+                    self.embed_avg.data.copy_(self.embedding.data)
+                    self.cluster_size.data.fill_(1.0)
+                else:
+                    nn.init.xavier_uniform_(self.embedding.weight.data)
+            self._initialized.fill_(True)
+            return
+
         print(f"Initializing codebook with k-means clustering...")
-        
+
         # Convert to numpy for sklearn k-means
         z_np = z.detach().cpu().numpy()
-        
+
         # Apply k-means clustering
         kmeans = KMeans(n_clusters=self.n_embed, random_state=42, n_init=10)
         kmeans.fit(z_np)
@@ -130,9 +145,27 @@ class RQVAEQuantizer(nn.Module):
         
         # Mark as initialized
         self._initialized.fill_(True)
-        
+
+    def reset_dead_codes(self, z: torch.Tensor, threshold: float = 0.001) -> int:
+        """Reset codebook entries whose EMA usage has fallen below threshold."""
+        if not self.training or not self.use_ema:
+            return 0
+        dead_mask = self.code_usage < threshold
+        n_dead = dead_mask.sum().item()
+        if n_dead == 0:
+            return 0
+        n = z.size(0)
+        idx = torch.randint(0, n, (n_dead,), device=z.device) if n_dead <= n \
+              else torch.randperm(n, device=z.device).repeat(n_dead // n + 1)[:n_dead]
+        repl = z[idx] + torch.randn_like(z[idx]) * 0.01
+        self.embedding.data[dead_mask] = repl
+        self.embed_avg.data[dead_mask] = repl
+        self.cluster_size.data[dead_mask] = 1.0
+        self.code_usage[dead_mask] = 0.5
+        return n_dead
+
     def forward(
-        self, 
+        self,
         z: torch.Tensor, 
         temperature: float = 0.2
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int]:
@@ -178,9 +211,18 @@ class RQVAEQuantizer(nn.Module):
             embed_onehot = F.one_hot(encoding_indices, self.n_embed)
             embed_onehot_sum = embed_onehot.sum(0)
             unused_codes = (embed_onehot_sum == 0).sum().item()
-            
-            # Compute losses
-            codebook_loss = F.mse_loss(z_q_loss, z.detach())
+
+            # EMA-tracked per-code usage for dead-code detection
+            if self.training and self.use_ema:
+                self.code_usage.data.mul_(self.decay).add_(
+                    (embed_onehot_sum > 0).float(), alpha=1 - self.decay)
+
+            # EMA maintains codebook via moving averages, so codebook_loss
+            # serves only as a metric (gradients blocked by requires_grad=False).
+            if self.use_ema:
+                codebook_loss = torch.tensor(0.0, device=z.device)
+            else:
+                codebook_loss = F.mse_loss(z_q_loss, z.detach())
             commitment_loss = F.mse_loss(z, z_q_loss.detach())
             
             return z_q_grad, codebook_loss, commitment_loss, encoding_indices, unused_codes
@@ -203,10 +245,15 @@ class RQVAEQuantizer(nn.Module):
             embed_onehot = F.one_hot(encoding_indices, self.n_embed)
             embed_onehot_sum = embed_onehot.sum(0)
             unused_codes = (embed_onehot_sum == 0).sum().item()
-            
+
+            # EMA-tracked per-code usage for dead-code detection
+            if self.training and self.use_ema:
+                self.code_usage.data.mul_(self.decay).add_(
+                    (embed_onehot_sum > 0).float(), alpha=1 - self.decay)
+
             # Get quantized embeddings
             z_q = F.embedding(encoding_indices, code_embs).view(batch_size, self.embed_dim)
-            
+
             if self.use_ema and self.training:
                 # EMA update of codebook
                 embed_onehot = embed_onehot.float()
