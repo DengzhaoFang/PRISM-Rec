@@ -66,10 +66,6 @@ class Experiment:
     inter_cos: float = 0.0
     neg_sim: float = 0.0
     high_sim: float = 0.0
-    # codebook
-    codes_l1: int = 0
-    codes_l2: int = 0
-    codes_l3: int = 0
     best_val: float = float("inf")
 
 
@@ -121,7 +117,7 @@ EXPERIMENT_NAME_ALIASES = {}
 _EPOCH_RE = re.compile(r"Epoch (\d+) Summary:")
 _TRAIN_RE = re.compile(r"Total Loss:\s+([\d.]+)")
 _UPR_RE = re.compile(r"UPR Loss:\s+([\d.]+)")
-_CODES_RE = re.compile(r"Perplexity Layer (\d): ([\d.]+)")
+_PERPLEXITY_RE = re.compile(r"Perplexity Layer (\d): ([\d.]+)")
 _BEST_RE = re.compile(r"New best loss: ([\d.]+)")
 # Match OLD log format: "[2] Latent z: norm=5.35±0.29 var=15.40 ... inter_cos=0.4598 neg%=1.0"
 _LATENT_RE = re.compile(r"\[2\] Latent z: norm=([\d.]+).*var=([\d.]+).*inter_cos=([\d.]+).*neg%=([\d.]+)")
@@ -157,8 +153,8 @@ def parse_metrics_from_log(log_path: Path) -> Dict:
     if m:
         metrics["upr_loss"] = float(m.group(1))
 
-    for m in _CODES_RE.finditer(block):
-        metrics[f"codes_l{m.group(1)}"] = int(m.group(2))
+    for m in _PERPLEXITY_RE.finditer(block):
+        metrics[f"perp_l{m.group(1)}"] = float(m.group(2))
 
     # latent space analysis (post-training, full log scan)
     match = _LATENT_RE.search(text)
