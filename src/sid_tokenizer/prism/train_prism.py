@@ -78,20 +78,11 @@ class PRISMTrainer:
         self.logger.setLevel(log_level)
         self.logger.handlers.clear()
 
-        console_handler = logging.StreamHandler()
-        console_handler.setLevel(log_level)
-        console_formatter = logging.Formatter(
-            '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-        )
-        console_handler.setFormatter(console_formatter)
-        self.logger.addHandler(console_handler)
-
         log_file = self.output_dir / 'training.log'
         file_handler = logging.FileHandler(log_file)
         file_handler.setLevel(log_level)
-        file_handler.setFormatter(console_formatter)
+        file_handler.setFormatter(logging.Formatter('%(message)s'))
         self.logger.addHandler(file_handler)
-        self.logger.info(f"Logging to {log_file}")
 
     def setup_data(self):
         self.logger.info("Loading dataset...")
@@ -184,8 +175,9 @@ class PRISMTrainer:
         )
         use_cma = self.config.get('use_ide', True)
 
+        commit_w = self.config.get('commit_weight', 0.0625)
         self.loss_fn = PRISMTotalLoss(
-            commitment_weight=self.config.get('beta', 0.25),
+            commit_weight=commit_w,
             use_saco=use_saco,
             lambda_sac=self.config.get('lambda_sac', 0.1),
             saco_temperature=self.config.get('saco_temperature', 0.07),
@@ -197,7 +189,8 @@ class PRISMTrainer:
         self.loss_fn = self.loss_fn.to(self.device)
         self.logger.info("Loss function initialized")
         self.logger.info(f"  UPR: MSE(z_dec, z_clean.detach()) — 256D unified reconstruction")
-        self.logger.info(f"  β (commitment)={self.config.get('beta', 0.25)}")
+        self.logger.info(f"  Commit weight={commit_w}")
+        self.logger.info(f"  Loss: UPR + {commit_w}*commit + SACO + CMA")
         self.logger.info(f"  CMA: {'ENABLED' if use_cma else 'DISABLED'}")
         if use_cma:
             self.logger.info(f"    λ_cma={self.config.get('lambda_cma', 0.1)}")
@@ -927,6 +920,52 @@ class PRISMTrainer:
         self.save_item_codebook_mappings()
         self.generate_semantic_ids_and_analyze()
         self.export_purified_embeddings()
+        self._analyze_embedding_quality()
+
+    def _analyze_embedding_quality(self):
+        """Deep embedding quality analysis — norms, variance, codebook stats."""
+        self._load_best_model_if_present()
+        self.model.eval()
+        all_z, all_zc, all_ht, all_hc, all_zq = [], [], [], [], []
+        with torch.no_grad():
+            for batch in self.item_eval_loader:
+                ce = batch['content_emb'].to(self.device)
+                cole = batch['collab_emb'].to(self.device)
+                enc = self.model.encode(ce, cole)
+                all_z.append(enc['z'].cpu()); all_zc.append(enc['z_clean'].cpu())
+                all_ht.append(enc.get('h_t_hat', enc['h_t']).cpu())
+                all_hc.append(enc.get('h_c_hat', enc['h_c']).cpu())
+                all_zq.append(self.model.quantize(enc['z'])[0].cpu())
+
+        z = torch.cat(all_z, dim=0); zc = torch.cat(all_zc, dim=0)
+        ht = torch.cat(all_ht, dim=0); hc = torch.cat(all_hc, dim=0); zq = torch.cat(all_zq, dim=0)
+        N = len(z); mask = ~torch.eye(N, dtype=torch.bool)
+        sim_z = torch.nn.functional.cosine_similarity(z.unsqueeze(1), z.unsqueeze(0), dim=-1)
+        sim_zc = torch.nn.functional.cosine_similarity(zc.unsqueeze(1), zc.unsqueeze(0), dim=-1)
+        commit = (z - zq).norm(dim=-1)
+
+        self.logger.info("=" * 70)
+        self.logger.info("DEEP EMBEDDING QUALITY ANALYSIS")
+        self.logger.info("[1] Pre-encoder: z_clean={:.2f}±{:.2f} h_t={:.2f} h_c={:.2f} zc_inter_cos={:.4f} zc_neg%={:.1f}".format(
+            zc.norm(dim=-1).mean(), zc.norm(dim=-1).std(), ht.norm(dim=-1).mean(), hc.norm(dim=-1).mean(),
+            sim_zc[mask].mean(), (sim_zc[mask]<0).float().mean()*100))
+        self.logger.info("[2] Latent z: norm={:.2f}±{:.2f} var={:.2f} dim_std={:.3f} inter_cos={:.4f} neg%={:.1f} ratio={:.2f}".format(
+            z.norm(dim=-1).mean(), z.norm(dim=-1).std(), z.var(dim=0).sum(), z.std(dim=0).mean(),
+            sim_z[mask].mean(), (sim_z[mask]<0).float().mean()*100, (z.norm(dim=-1).mean()/zc.norm(dim=-1).mean())))
+        self.logger.info("[3] Quantized: zq_norm={:.2f} commit|z-zq|={:.3f} commit_ratio={:.3f}".format(
+            zq.norm(dim=-1).mean(), commit.mean(), commit.mean()/z.norm(dim=-1).mean()))
+        cbs = self.model.get_codebooks()
+        for li, cb in enumerate(cbs):
+            cn = cb.norm(dim=-1); dead = (cn < 1e-4).sum().item()
+            cb_sim = torch.nn.functional.cosine_similarity(cb.unsqueeze(1), cb.unsqueeze(0), dim=-1)
+            cbm = ~torch.eye(len(cb), dtype=torch.bool)
+            self.logger.info("[4] Codebook L{}: norm={:.2f}±{:.2f} dead={} inter_cos={:.4f}".format(
+                li+1, cn.mean(), cn.std(), dead, cb_sim[cbm].mean()))
+        enc_mod = self.model.encoder.encoder; dec_mod = self.model.decoder.shared_decoder
+        self.logger.info("[5] Encoder W: L0={:.2f} Llast={:.2f} | Decoder W: L0={:.2f} Llast={:.2f}".format(
+            enc_mod[0].weight.data.norm(), enc_mod[-1].weight.data.norm() if hasattr(enc_mod[-1], 'weight') else 0,
+            dec_mod[0].weight.data.norm(), dec_mod[-1].weight.data.norm() if hasattr(dec_mod[-1], 'weight') else 0))
+        self.logger.info("=" * 70)
 
 
 def parse_args():
@@ -989,7 +1028,9 @@ def parse_args():
 
     # Loss weights
     parser.add_argument('--beta', type=float, default=0.25,
-                        help='Commitment loss weight')
+                        help='VQ beta (quantizer internal, mostly unused with EMA)')
+    parser.add_argument('--commit_weight', type=float, default=0.0625,
+                        help='Effective commitment loss weight (0.0625 = OLD default)')
 
     # Quantization arguments
     parser.add_argument('--use_ema', action='store_true',

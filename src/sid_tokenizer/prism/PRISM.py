@@ -273,7 +273,9 @@ class PRISM(nn.Module):
             perplexities.append(n_embed - unused_codes)
 
         z_q = torch.stack(z_q_layers, dim=0).sum(dim=0)
-        total_loss = total_codebook_loss + self.beta * total_commitment_loss
+        # Pass raw codebook + commitment to loss function.
+        # The effective commitment weight is controlled by --commit_weight (default 0.0625).
+        total_loss = total_codebook_loss + total_commitment_loss
 
         return z_q, quantized_codes, encoding_indices, total_loss, perplexities
 

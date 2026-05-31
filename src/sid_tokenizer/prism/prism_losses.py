@@ -97,12 +97,12 @@ class PRISMTotalLoss(nn.Module):
     """
     Combined loss for PRISM training.
 
-    L = L_UPR + β * L_commit + λ_cma * L_CMA + λ_sac * L_SACO
+    L = L_UPR + commit_weight * L_commit + λ_cma * L_CMA + λ_sac * L_SACO
     """
 
     def __init__(
         self,
-        commitment_weight: float = 0.25,
+        commit_weight: float = 0.0625,
         use_saco: bool = False,
         lambda_sac: float = 0.1,
         saco_temperature: float = 0.07,
@@ -113,7 +113,7 @@ class PRISMTotalLoss(nn.Module):
         super().__init__()
 
         self.upr_loss = UPRLoss()
-        self.commitment_weight = commitment_weight
+        self.commit_weight = commit_weight
 
         self.use_cma = use_cma
         if use_cma:
@@ -145,7 +145,7 @@ class PRISMTotalLoss(nn.Module):
 
         dict_commit = {}
         if commitment_loss is not None:
-            extra_losses = extra_losses + self.commitment_weight * commitment_loss
+            extra_losses = extra_losses + self.commit_weight * commitment_loss
             dict_commit = {'commitment': commitment_loss.item()}
 
         dict_cma = {}

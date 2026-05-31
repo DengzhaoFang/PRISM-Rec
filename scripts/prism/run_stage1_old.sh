@@ -19,7 +19,7 @@ python train_prism.py \
     --lambda_cma 0.1 --cma_temperature 0.07 \
     --epochs 500 --batch_size 512 --learning_rate 1e-4 \
     --weight_decay 1e-4 --grad_clip 1.0 \
-    --beta 0.25 --use_ema --ema_decay 0.99 --quantize_mode rotation \
+    --commit_weight 0.0625 --use_ema --ema_decay 0.99 --quantize_mode rotation \
     --use_scheduler --scheduler_type warmup_cosine --warmup_ratio 0.1 \
     --early_stop_patience 30 --early_stop_min_delta 1e-5 \
     --early_stop_cooldown 3 --early_stop_warmup_epochs 5 \
