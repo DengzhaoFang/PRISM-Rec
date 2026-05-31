@@ -16,7 +16,7 @@ from rich.table import Table
 from rich.text import Text
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = SCRIPT_DIR.parent.parent
+PROJECT_ROOT = SCRIPT_DIR.parent.parent.parent
 TRAIN_SCRIPT = PROJECT_ROOT / "src/sid_tokenizer/prism/train_prism.py"
 
 @dataclass
