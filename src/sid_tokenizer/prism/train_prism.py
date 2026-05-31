@@ -924,7 +924,7 @@ class PRISMTrainer:
 
     def _analyze_embedding_quality(self):
         """Deep embedding quality analysis — norms, variance, codebook stats."""
-        self._load_best_model_if_present()
+        # Best model already loaded by export_purified_embeddings()
         self.model.eval()
         all_z, all_zc, all_ht, all_hc, all_zq = [], [], [], [], []
         with torch.no_grad():

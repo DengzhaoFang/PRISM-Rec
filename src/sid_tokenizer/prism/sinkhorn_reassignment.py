@@ -77,7 +77,7 @@ class SinkhornIDReassigner:
         """Setup logging"""
         logging.basicConfig(
             level=logging.INFO,
-            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+            format='%(message)s'
         )
         self.logger = logging.getLogger('SinkhornReassigner')
     
@@ -138,20 +138,12 @@ class SinkhornIDReassigner:
         
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
         config = checkpoint['config']
-        
-        # Load dataset
+
+        # Load dataset (MCD version, no tag_stats)
         self.dataset = PRISMDataset(data_dir=data_dir)
-        
-        # Create model
-        num_classes_per_layer = [
-            self.dataset.tag_stats[f'n_L{i+2}'] + 1
-            for i in range(config.get('n_layers', 3))
-        ]
-        
-        self.model = create_prism_from_config(
-            config=config,
-            num_classes_per_layer=num_classes_per_layer
-        )
+
+        # MCD model: all codebooks size 256, no per-layer class counts
+        self.model = create_prism_from_config(config=config)
         
         self.model.load_state_dict(checkpoint['model_state_dict'])
         self.model = self.model.to(self.device)
