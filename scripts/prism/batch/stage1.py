@@ -411,6 +411,7 @@ class BatchRunner:
 
         env = os.environ.copy()
         env["CUDA_VISIBLE_DEVICES"] = str(gpu)
+        env["TQDM_DISABLE"] = "1"
 
         cmd = [
             sys.executable, str(TRAIN_SCRIPT),
