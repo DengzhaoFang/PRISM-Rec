@@ -925,10 +925,18 @@ class PRISMTrainer:
         self.logger.info(f"Output directory: {self.output_dir}")
         self.logger.info("=" * 80)
 
-        self.save_item_codebook_mappings()
-        self.generate_semantic_ids_and_analyze()
-        self.export_purified_embeddings()
-        self._analyze_embedding_quality()
+        for step_name, step_fn in [
+            ("save_item_codebook_mappings", self.save_item_codebook_mappings),
+            ("generate_semantic_ids_and_analyze", self.generate_semantic_ids_and_analyze),
+            ("export_purified_embeddings", self.export_purified_embeddings),
+            ("_analyze_embedding_quality", self._analyze_embedding_quality),
+        ]:
+            try:
+                step_fn()
+            except Exception as e:
+                self.logger.error(f"Post-training step '{step_name}' failed: {e}")
+                import traceback
+                self.logger.error(traceback.format_exc())
 
     def _analyze_embedding_quality(self):
         """Deep embedding quality analysis — norms, variance, codebook stats."""
