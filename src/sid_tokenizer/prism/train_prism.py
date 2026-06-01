@@ -939,7 +939,9 @@ class PRISMTrainer:
                 self.logger.error(traceback.format_exc())
 
     def _analyze_embedding_quality(self):
-        """Deep embedding quality analysis — norms, variance, codebook stats."""
+        """Deep embedding quality analysis — norms, variance, codebook stats.
+        Uses sampling for inter-item cosine to avoid OOM (256D × N²).
+        """
         self.model.eval()
         all_z, all_zc, all_ht, all_hc, all_zq = [], [], [], [], []
         with torch.no_grad():
@@ -952,21 +954,30 @@ class PRISMTrainer:
                 all_hc.append(enc.get('h_c_hat', enc['h_c']).cpu())
                 all_zq.append(self.model.quantize(enc['z'])[0].cpu())
 
-        z = torch.cat(all_z, dim=0); zc = torch.cat(all_zc, dim=0)
+        z  = torch.cat(all_z,  dim=0); zc = torch.cat(all_zc, dim=0)
         ht = torch.cat(all_ht, dim=0); hc = torch.cat(all_hc, dim=0); zq = torch.cat(all_zq, dim=0)
-        N = len(z); mask = ~torch.eye(N, dtype=torch.bool)
-        sim_z = torch.nn.functional.cosine_similarity(z.unsqueeze(1), z.unsqueeze(0), dim=-1)
-        sim_zc = torch.nn.functional.cosine_similarity(zc.unsqueeze(1), zc.unsqueeze(0), dim=-1)
+        N  = len(z)
         commit = (z - zq).norm(dim=-1)
 
+        # Inter-item cosine: sample up to 3000 items to avoid OOM (256D×N² is ~37GB)
+        sample_n = min(N, 3000)
+        if N > sample_n:
+            idx = torch.randperm(N)[:sample_n]
+            z_sample = z[idx]; zc_sample = zc[idx]
+        else:
+            z_sample = z; zc_sample = zc
+        S = len(z_sample); smask = ~torch.eye(S, dtype=torch.bool)
+        sim_z  = torch.nn.functional.cosine_similarity(z_sample.unsqueeze(1),  z_sample.unsqueeze(0),  dim=-1)
+        sim_zc = torch.nn.functional.cosine_similarity(zc_sample.unsqueeze(1), zc_sample.unsqueeze(0), dim=-1)
+
         self.logger.info("=" * 70)
-        self.logger.info("DEEP EMBEDDING QUALITY ANALYSIS")
+        self.logger.info("DEEP EMBEDDING QUALITY ANALYSIS (n={})".format(N))
         self.logger.info("[1] Pre-encoder: z_clean={:.2f}+/-{:.2f} h_t={:.2f} h_c={:.2f} zc_inter_cos={:.4f} zc_neg%={:.1f}".format(
             zc.norm(dim=-1).mean(), zc.norm(dim=-1).std(), ht.norm(dim=-1).mean(), hc.norm(dim=-1).mean(),
-            sim_zc[mask].mean(), (sim_zc[mask]<0).float().mean()*100))
+            sim_zc[smask].mean(), (sim_zc[smask]<0).float().mean()*100))
         self.logger.info("[2] Latent z: norm={:.2f}+/-{:.2f} var={:.2f} inter_cos={:.4f} neg%={:.1f} ratio={:.2f}".format(
             z.norm(dim=-1).mean(), z.norm(dim=-1).std(), z.var(dim=0).sum(),
-            sim_z[mask].mean(), (sim_z[mask]<0).float().mean()*100, (z.norm(dim=-1).mean()/zc.norm(dim=-1).mean())))
+            sim_z[smask].mean(), (sim_z[smask]<0).float().mean()*100, (z.norm(dim=-1).mean()/zc.norm(dim=-1).mean())))
         self.logger.info("[3] Quantized: zq_norm={:.2f} commit|z-zq|={:.3f} commit_ratio={:.3f}".format(
             zq.norm(dim=-1).mean(), commit.mean(), commit.mean()/z.norm(dim=-1).mean()))
         cbs = self.model.get_codebooks()
@@ -976,7 +987,6 @@ class PRISMTrainer:
             cbm = ~torch.eye(len(cb), dtype=torch.bool)
             self.logger.info("[4] Codebook L{}: norm={:.2f}+/-{:.2f} dead={} inter_cos={:.4f}".format(
                 li+1, cn.mean(), cn.std(), dead, cb_sim[cbm].mean()))
-        # Encoder/Decoder weight norms — OLD structure: self.model.encoder.encoder (MLP), self.model.decoder (Sequential)
         enc_layers = list(self.model.encoder.encoder)
         dec_layers = list(self.model.decoder.shared_decoder) if hasattr(self.model.decoder, 'shared_decoder') else []
         if dec_layers:
