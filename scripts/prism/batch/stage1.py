@@ -448,7 +448,8 @@ class BatchRunner:
             if ret is not None:
                 # process finished
                 exp.finished_at = time.time()
-                exp.status = "done" if ret == 0 else "failed"
+                # Mark as done if training completed (best_model.pt exists) even if post-training had errors
+                exp.status = "done" if (ret == 0 or (exp.output_dir / "best_model.pt").exists()) else "failed"
                 finished_gpus.append(gpu)
 
         # free up finished GPUs
