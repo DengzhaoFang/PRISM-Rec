@@ -26,18 +26,6 @@ class QuantizeMode(Enum):
     GUMBEL_SOFTMAX = "gumbel_softmax"  # Gumbel Softmax (fully differentiable)
 
 
-def sample_gumbel(shape: Tuple, device: torch.device, eps: float = 1e-20) -> torch.Tensor:
-    """Sample from Gumbel(0, 1) distribution"""
-    U = torch.rand(shape, device=device)
-    return -torch.log(-torch.log(U + eps) + eps)
-
-
-def gumbel_softmax_sample(logits: torch.Tensor, temperature: float, device: torch.device) -> torch.Tensor:
-    """Draw a sample from the Gumbel-Softmax distribution"""
-    y = logits + sample_gumbel(logits.shape, device)
-    sample = F.softmax(y / temperature, dim=-1)
-    return sample
-
 
 class RQVAEQuantizer(nn.Module):
     """

@@ -9,7 +9,7 @@ Loads and combines:
 
 import os
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Set
+from typing import Dict, Optional, Tuple, Set
 from collections import defaultdict
 
 import numpy as np
@@ -202,14 +202,3 @@ def create_dataloaders(
 
     return dataloader, dataset
 
-
-def collate_prism_batch(batch: List[Dict]) -> Dict[str, torch.Tensor]:
-    result = {
-        'item_id': torch.tensor([item['item_id'] for item in batch]),
-        'content_emb': torch.stack([item['content_emb'] for item in batch]),
-        'collab_emb': torch.stack([item['collab_emb'] for item in batch]),
-    }
-    if 'pos_content_emb' in batch[0]:
-        result['pos_content_emb'] = torch.stack([item['pos_content_emb'] for item in batch])
-        result['pos_collab_emb'] = torch.stack([item['pos_collab_emb'] for item in batch])
-    return result

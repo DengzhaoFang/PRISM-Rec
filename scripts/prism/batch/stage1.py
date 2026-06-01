@@ -88,25 +88,42 @@ BASE_TRAIN_ARGS = [
     "--commit_weight", "0.25",
     "--use_ema", "--ema_decay", "0.99", "--quantize_mode", "rotation",
     "--use_scheduler", "--scheduler_type", "warmup_cosine", "--warmup_ratio", "0.1",
-    "--early_stop_patience", "30", "--early_stop_min_delta", "1e-5",
+    "--early_stop_patience", "80", "--early_stop_min_delta", "1e-5",
     "--early_stop_cooldown", "3", "--early_stop_warmup_epochs", "5",
     "--perplexity_collapse_ratio", "0.35", "--perplexity_collapse_patience", "3",
-    "--no_hierarchical_kmeans_init", "--kmeans_init_samples", "8192",
+    "--kmeans_init_samples", "8192",
     "--save_every", "50", "--num_workers", "4", "--log_level", "INFO",
     "--ide", "on", "--ide_dim", "128",
 ]
 
 EXPERIMENT_GROUPS = [
-    ("Module Ablation", [
-        ("base_rq",  ["--mcd", "off", "--lambda_cma", "0.0"]),
-        # ("cma_only",              ["--mcd", "off"]),
-        # ("cma_mcd",               []),
-        # ("cma_mcd_saco_c025",     ["--use_saco", "--lambda_sac", "0.1",
-        #                            "--commit_weight", "0.25"]),
-        # ("cma_mcd_saco_c00625",   ["--use_saco", "--lambda_sac", "0.1",
-        #                            "--commit_weight", "0.0625"]),
-        # ("cma_mcd_saco_c0",   ["--use_saco", "--lambda_sac", "0.1",
-        #                            "--commit_weight", "0.0"]),
+    ("CMA+SACO vs Gate+SACO(z/zq/curriculum)", [
+        # A: CMA + SACO baseline
+        ("cma_saco_z",
+         ["--use_saco", "--lambda_sac", "0.1",
+          "--lambda_cma", "0.1"]),
+
+        # B: CMA + Reliability Gate + SACO(z)
+        ("cma_gate_saco_z",
+         ["--use_saco", "--lambda_sac", "0.1",
+          "--lambda_cma", "0.1",
+          "--use_reliability_gate", "--gate_hidden_dim", "32"]),
+
+        # C: CMA + Reliability Gate + SACO(zq)
+        ("cma_gate_saco_zq",
+         ["--use_saco", "--lambda_sac", "0.1",
+          "--lambda_cma", "0.1",
+          "--use_reliability_gate", "--gate_hidden_dim", "32",
+          "--saco_target", "zq",
+          "--lambda_codebook_entropy", "0.01"]),
+
+        # D: CMA + Reliability Gate + SACO(curriculum z→zq)
+        ("cma_gate_saco_curriculum",
+         ["--use_saco", "--lambda_sac", "0.1",
+          "--lambda_cma", "0.1",
+          "--use_reliability_gate", "--gate_hidden_dim", "32",
+          "--saco_target", "curriculum",
+          "--saco_curriculum_warmup_epochs", "150"]),
     ]),
 ]
 

@@ -13,7 +13,7 @@ MCD: Asymmetric cross-modal denoising that replaces popularity-based confidence:
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Tuple, Optional
+from typing import Tuple
 
 
 class IDEEqualizer(nn.Module):
