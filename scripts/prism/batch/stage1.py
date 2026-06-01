@@ -61,11 +61,11 @@ class Experiment:
     upr_loss: float = 0.0
     commit_loss: float = 0.0
     # latent space metrics
-    z_norm: float = 0.0
-    z_total_var: float = 0.0
-    inter_cos: float = 0.0
-    neg_sim: float = 0.0
-    high_sim: float = 0.0
+    z_norm: Optional[float] = None
+    z_total_var: Optional[float] = None
+    inter_cos: Optional[float] = None
+    neg_sim: Optional[float] = None
+    high_sim: Optional[float] = None
     best_val: float = float("inf")
 
 
@@ -335,8 +335,8 @@ def build_dashboard(exps: List[Experiment], gpus: List[int],
             _fmt(exp.val_loss),
             _fmt(exp.best_val) if exp.best_val < float("inf") else "--",
             _fmt(exp.upr_loss),
-            _fmt(exp.z_norm, dec=2) if exp.z_norm else "--",
-            _fmt(exp.inter_cos, dec=4) if exp.inter_cos else "--",
+            _fmt(exp.z_norm, dec=2) if exp.z_norm is not None else "--",
+            _fmt(exp.inter_cos, dec=4) if exp.inter_cos is not None else "--",
             gpu_label,
             dur,
         )
@@ -562,9 +562,9 @@ class BatchRunner:
                 (exp.finished_at - exp.started_at) if exp.finished_at and exp.started_at else None
             )
             best = f"{exp.best_val:.4f}" if exp.best_val < float("inf") else "--"
-            z_norm_str = f"{exp.z_norm:.2f}" if exp.z_norm else "--"
-            inter_cos_str = f"{exp.inter_cos:.4f}" if exp.inter_cos else "--"
-            neg_sim_str = f"{exp.neg_sim*100:.1f}" if exp.neg_sim else "--"
+            z_norm_str = f"{exp.z_norm:.2f}" if exp.z_norm is not None else "--"
+            inter_cos_str = f"{exp.inter_cos:.4f}" if exp.inter_cos is not None else "--"
+            neg_sim_str = f"{exp.neg_sim*100:.1f}" if exp.neg_sim is not None else "--"
             summary_table.add_row(
                 exp.name,
                 f"[{color}]{icon} {exp.status}[/{color}]",
@@ -599,11 +599,11 @@ class BatchRunner:
                 "best_val": exp.best_val if exp.best_val < float("inf") else None,
                 "upr_loss": exp.upr_loss if exp.upr_loss else None,
                 "epoch": exp.epoch,
-                "z_norm": exp.z_norm if exp.z_norm else None,
-                "z_total_var": exp.z_total_var if exp.z_total_var else None,
-                "inter_cos": exp.inter_cos if exp.inter_cos else None,
-                "neg_sim_pct": round(exp.neg_sim * 100, 1) if exp.neg_sim else None,
-                "high_sim_pct": round(exp.high_sim * 100, 1) if exp.high_sim else None,
+                "z_norm": exp.z_norm if exp.z_norm is not None else None,
+                "z_total_var": exp.z_total_var if exp.z_total_var is not None else None,
+                "inter_cos": exp.inter_cos if exp.inter_cos is not None else None,
+                "neg_sim_pct": round(exp.neg_sim * 100, 1) if exp.neg_sim is not None else None,
+                "high_sim_pct": round(exp.high_sim * 100, 1) if exp.high_sim is not None else None,
                 "duration": format_duration(
                     (exp.finished_at - exp.started_at) if exp.finished_at and exp.started_at else None
                 ),
