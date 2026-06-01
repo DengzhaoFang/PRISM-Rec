@@ -85,7 +85,7 @@ BASE_TRAIN_ARGS = [
     "--content_dim", "768", "--collab_dim", "64",
     "--epochs", "500", "--batch_size", "512", "--learning_rate", "1e-4",
     "--weight_decay", "1e-4", "--grad_clip", "1.0",
-    "--commit_weight", "0.0625",
+    "--commit_weight", "0.25",
     "--use_ema", "--ema_decay", "0.99", "--quantize_mode", "rotation",
     "--use_scheduler", "--scheduler_type", "warmup_cosine", "--warmup_ratio", "0.1",
     "--early_stop_patience", "30", "--early_stop_min_delta", "1e-5",
@@ -98,12 +98,15 @@ BASE_TRAIN_ARGS = [
 
 EXPERIMENT_GROUPS = [
     ("Module Ablation", [
-        ("cma_only",              ["--mcd", "off"]),
-        ("cma_mcd",               []),
-        ("cma_mcd_saco_c025",     ["--use_saco", "--lambda_sac", "0.1",
-                                   "--commit_weight", "0.25"]),
-        ("cma_mcd_saco_c00625",   ["--use_saco", "--lambda_sac", "0.1",
-                                   "--commit_weight", "0.0625"]),
+        ("base_rq",  ["--mcd", "off", "--lambda_cma", "0.0"]),
+        # ("cma_only",              ["--mcd", "off"]),
+        # ("cma_mcd",               []),
+        # ("cma_mcd_saco_c025",     ["--use_saco", "--lambda_sac", "0.1",
+        #                            "--commit_weight", "0.25"]),
+        # ("cma_mcd_saco_c00625",   ["--use_saco", "--lambda_sac", "0.1",
+        #                            "--commit_weight", "0.0625"]),
+        # ("cma_mcd_saco_c0",   ["--use_saco", "--lambda_sac", "0.1",
+        #                            "--commit_weight", "0.0"]),
     ]),
 ]
 

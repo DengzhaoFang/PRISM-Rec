@@ -1023,10 +1023,6 @@ def parse_args():
     # IDE + MCD arguments
     parser.add_argument('--ide', type=str, default='on', choices=['on', 'off'],
                         help='Enable/disable IDE (default: on). Ablation: --ide off')
-    parser.add_argument('--mcd', type=str, default='on', choices=['on', 'off'],
-                        help='Enable/disable MCD (default: on). Ablation: --mcd off')
-    parser.add_argument('--ide_dim', type=int, default=128,
-                        help='IDE projection dimension d (default: 128)')
 
     # SACO arguments
     parser.add_argument('--use_saco', action='store_true',
@@ -1124,7 +1120,6 @@ def main():
     config = vars(args)
 
     config['use_ide'] = (args.ide == 'on')
-    config['use_mcd'] = (args.mcd == 'on')
 
     if args.n_embed_per_layer is not None:
         try:

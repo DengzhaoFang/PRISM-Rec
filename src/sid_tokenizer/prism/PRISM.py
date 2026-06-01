@@ -1,13 +1,13 @@
 """
-PRISM: Hierarchical ID VAE with IDE + MCD + UPR + SACO
+PRISM: Hierarchical ID VAE with IDE + UPR + SACO
 
 Architecture:
 1. IDE: projects text (768D) and collab (64D) -> shared 128D
-2. MCD: cross-modal consistency-based asymmetric denoising
-3. Fusion: z_clean = [h_c_hat || h_t_hat]  (256D clean fused feature)
-4. Encoder: z_clean -> MLP -> z_latent (latent_dim)
-5. RQ-VAE: hierarchical quantization of z_latent
-6. UnifiedDecoder: z_q -> z_dec (256D, reconstructs z_clean)
+2. 
+2. Fusion: z_clean = [h_c || h_t]  (256D clean fused feature)
+3. Encoder: z_clean -> MLP -> z_latent (latent_dim)
+4. RQ-VAE: hierarchical quantization of z_latent
+5. UnifiedDecoder: z_q -> z_dec (256D, reconstructs z_clean)
 
 Loss: L_UPR (MSE on z_clean) + beta * L_commit + lambda_sac * L_SACO
 """
@@ -18,7 +18,7 @@ import torch.nn.functional as F
 from typing import Dict, List, Tuple, Optional
 
 from RQ_VAE import RQVAEQuantizer, QuantizeMode
-from ide_mcd import IDEEqualizer, MCDModule
+from ide import IDEEqualizer
 
 
 class MultiModalEncoder(nn.Module):
@@ -27,8 +27,8 @@ class MultiModalEncoder(nn.Module):
 
     Pipeline:
     1. IDE: Project text (768D) and collab (64D) to shared dimension d=128
-    2. MCD: Cross-modal consistency-based asymmetric denoising
-    3. Fusion: z_clean = [h_c_hat || h_t_hat]  (256D clean feature)
+    
+    2. Fusion: z_clean = [h_c || h_t]  (256D clean feature)
     4. Encode: MLP projects z_clean -> z_latent (latent_dim)
     """
 
@@ -39,7 +39,6 @@ class MultiModalEncoder(nn.Module):
         latent_dim: int = 32,
         hidden_dims: Optional[List[int]] = None,
         use_ide: bool = True,
-        use_mcd: bool = True,
         ide_dim: int = 128,
     ):
         super().__init__()
@@ -48,7 +47,6 @@ class MultiModalEncoder(nn.Module):
         self.collab_dim = collab_dim
         self.latent_dim = latent_dim
         self.use_ide = use_ide
-        self.use_mcd = use_mcd
         self.ide_dim = ide_dim
 
         if use_ide:
@@ -60,18 +58,7 @@ class MultiModalEncoder(nn.Module):
             fusion_dim = ide_dim * 2  # 256
         else:
             self.ide = None
-            fusion_dim = content_dim + collab_dim  # 832 fallback
-
-        if use_mcd:
-            if not use_ide:
-                raise ValueError(
-                    "MCD requires IDE to be enabled. "
-                    "Cross-modal consistency needs equalized dimensions (ide_dim=128) "
-                    "to compute cosine similarity between modalities."
-                )
-            self.mcd = MCDModule(d=ide_dim, enabled=True)
-        else:
-            self.mcd = None
+            fusion_dim = content_dim + collab_dim
 
         if hidden_dims is None:
             hidden_dims = [512, 256, 128]
@@ -99,24 +86,14 @@ class MultiModalEncoder(nn.Module):
         else:
             h_t, h_c = content_emb, collab_emb
 
-        if self.mcd is not None:
-            h_t_hat, h_c_hat, consistency = self.mcd(h_t, h_c)
-        else:
-            h_t_hat, h_c_hat = h_t, h_c
-            consistency = None
-
-        # z_clean: purified fused feature — target for UPR reconstruction
-        z_clean = torch.cat([h_c_hat, h_t_hat], dim=-1)
+        z_clean = torch.cat([h_c, h_t], dim=-1)
         z = self.encoder(z_clean)
 
         return {
             'z': z,
             'z_clean': z_clean,
-            'consistency': consistency,
             'h_t': h_t,
             'h_c': h_c,
-            'h_t_hat': h_t_hat,
-            'h_c_hat': h_c_hat,
         }
 
 
@@ -172,11 +149,10 @@ class PRISM(nn.Module):
 
     Architecture:
     1. IDE: projects text (768D) and collab (64D) -> shared 128D
-    2. MCD: cross-modal consistency-based asymmetric denoising
-    3. Fusion: z_clean = [h_c_hat || h_t_hat]  (256D)
-    4. Encoder: z_clean -> MLP -> z_latent (latent_dim)
-    5. RQ-VAE: hierarchical quantization of z_latent -> z_q
-    6. UnifiedDecoder: z_q -> z_dec (256D, targets z_clean.detach())
+    2. Fusion: z_clean = [h_c || h_t]  (256D)
+    3. Encoder: z_clean -> MLP -> z_latent (latent_dim)
+    4. RQ-VAE: hierarchical quantization of z_latent -> z_q
+    5. UnifiedDecoder: z_q -> z_dec (256D, targets z_clean.detach())
 
     Loss: L_UPR = MSE(z_dec, z_clean.detach())
     """
@@ -192,7 +168,6 @@ class PRISM(nn.Module):
         encoder_hidden_dims: Optional[List[int]] = None,
         decoder_hidden_dims: Optional[List[int]] = None,
         use_ide: bool = True,
-        use_mcd: bool = True,
         ide_dim: int = 128,
         use_ema: bool = True,
         ema_decay: float = 0.99,
@@ -205,7 +180,6 @@ class PRISM(nn.Module):
         self.collab_dim = collab_dim
         self.latent_dim = latent_dim
         self.n_layers = n_layers
-        self.use_mcd = use_mcd
 
         if n_embed_per_layer is None:
             self.n_embed_per_layer = [n_embed] * n_layers
@@ -224,7 +198,6 @@ class PRISM(nn.Module):
             latent_dim=latent_dim,
             hidden_dims=encoder_hidden_dims,
             use_ide=use_ide,
-            use_mcd=use_mcd,
             ide_dim=ide_dim,
         )
 
@@ -302,11 +275,8 @@ class PRISM(nn.Module):
             'z_dec': z_dec,
             'z_clean': z_clean,
             'z': z,
-            'h_t': enc_outputs.get('h_t'),
-            'h_c': enc_outputs.get('h_c'),
-            'h_t_hat': enc_outputs.get('h_t_hat'),
-            'h_c_hat': enc_outputs.get('h_c_hat'),
-            'consistency': enc_outputs['consistency'],
+            'h_t': enc_outputs['h_t'],
+            'h_c': enc_outputs['h_c'],
             'codebook_loss': codebook_loss,
             'perplexities': perplexities,
         }
@@ -360,7 +330,6 @@ def create_prism_from_config(config: Dict) -> PRISM:
         encoder_hidden_dims=config.get('encoder_hidden_dims'),
         decoder_hidden_dims=config.get('decoder_hidden_dims'),
         use_ide=config.get('use_ide', True),
-        use_mcd=config.get('use_mcd', True),
         ide_dim=config.get('ide_dim', 128),
         use_ema=config.get('use_ema', True),
         ema_decay=config.get('ema_decay', 0.99),
