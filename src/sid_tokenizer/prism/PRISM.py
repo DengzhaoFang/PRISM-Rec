@@ -23,15 +23,13 @@ from ide import IDEEqualizer
 
 class MultiModalEncoder(nn.Module):
     """
-    Multi-modal encoder with IDE + optional Reliability Gate.
+    Multi-modal encoder with IDE.
 
     Pipeline:
     1. IDE: Project text (768D) and collab (64D) to shared dimension d=128
        with LayerNorm for gradient equalization.
-    2. Reliability Gate (optional): Learns per-item collaborative modality
-       trust α from pre-LN h_c_raw, scales post-LN h_c by α.
-    3. Fusion: z_clean = [α·h_c || h_t]  (256D clean feature)
-    4. Encode: MLP projects z_clean -> z_latent (latent_dim)
+    2. Fusion: z_clean = [h_c || h_t]  (256D clean feature)
+    3. Encode: MLP projects z_clean -> z_latent (latent_dim)
     """
 
     def __init__(
@@ -42,8 +40,6 @@ class MultiModalEncoder(nn.Module):
         hidden_dims: Optional[List[int]] = None,
         use_ide: bool = True,
         ide_dim: int = 128,
-        use_reliability_gate: bool = False,
-        gate_hidden_dim: int = 32,
     ):
         super().__init__()
 
@@ -52,7 +48,6 @@ class MultiModalEncoder(nn.Module):
         self.latent_dim = latent_dim
         self.use_ide = use_ide
         self.ide_dim = ide_dim
-        self.use_reliability_gate = use_reliability_gate
 
         if use_ide:
             self.ide = IDEEqualizer(
@@ -64,18 +59,6 @@ class MultiModalEncoder(nn.Module):
         else:
             self.ide = None
             fusion_dim = content_dim + collab_dim
-
-        if use_reliability_gate:
-            from modality_reliability_gate import ModalityReliabilityGate
-            # Gate takes raw collaborative embedding e_c (64D), not the
-            # IDE projection. The raw embedding preserves per-item norm
-            # information (ρ≈0.78 with popularity) that LayerNorm strips.
-            self.reliability_gate = ModalityReliabilityGate(
-                input_dim=collab_dim,
-                hidden_dim=gate_hidden_dim,
-            )
-        else:
-            self.reliability_gate = None
 
         if hidden_dims is None:
             hidden_dims = [512, 256, 128]
@@ -103,27 +86,15 @@ class MultiModalEncoder(nn.Module):
         else:
             h_t, h_c = content_emb, collab_emb
 
-        # Reliability gate: reads raw collab embedding e_c (64D), which
-        # preserves per-item norm information. Gate output α scales the
-        # post-LN h_c direction — when collab is unreliable (cold-start),
-        # the encoder sees a down-weighted h_c and relies more on h_t.
-        alpha = None
-        if self.reliability_gate is not None:
-            alpha = self.reliability_gate(collab_emb)  # raw 64D e_c → α
-            h_c = alpha * h_c
-
         z_clean = torch.cat([h_c, h_t], dim=-1)
         z = self.encoder(z_clean)
 
-        result = {
+        return {
             'z': z,
             'z_clean': z_clean,
             'h_t': h_t,
             'h_c': h_c,
         }
-        if alpha is not None:
-            result['alpha'] = alpha
-        return result
 
 
 class UnifiedDecoder(nn.Module):
@@ -178,11 +149,10 @@ class PRISM(nn.Module):
 
     Architecture:
     1. IDE: projects text (768D) and collab (64D) -> shared 128D
-    2. Reliability Gate (optional): learns per-item α from pre-LN h_c_raw
-    3. Fusion: z_clean = [α·h_c || h_t]  (256D)
-    4. Encoder: z_clean -> MLP -> z_latent (latent_dim)
-    5. RQ-VAE: hierarchical quantization of z_latent -> z_q
-    6. UnifiedDecoder: z_q -> z_dec (256D, targets z_clean.detach())
+    2. Fusion: z_clean = [h_c || h_t]  (256D)
+    3. Encoder: z_clean -> MLP -> z_latent (latent_dim)
+    4. RQ-VAE: hierarchical quantization of z_latent -> z_q
+    5. UnifiedDecoder: z_q -> z_dec (256D, targets z_clean.detach())
 
     Loss: L_UPR = MSE(z_dec, z_clean.detach())
     """
@@ -203,8 +173,6 @@ class PRISM(nn.Module):
         ema_decay: float = 0.99,
         beta: float = 0.25,
         quantize_mode: QuantizeMode = QuantizeMode.ROTATION,
-        use_reliability_gate: bool = False,
-        gate_hidden_dim: int = 32,
     ):
         super().__init__()
 
@@ -231,8 +199,6 @@ class PRISM(nn.Module):
             hidden_dims=encoder_hidden_dims,
             use_ide=use_ide,
             ide_dim=ide_dim,
-            use_reliability_gate=use_reliability_gate,
-            gate_hidden_dim=gate_hidden_dim,
         )
 
         self.quantizers = nn.ModuleList([
@@ -315,9 +281,6 @@ class PRISM(nn.Module):
             'perplexities': perplexities,
         }
 
-        if 'alpha' in enc_outputs:
-            output_dict['alpha'] = enc_outputs['alpha']
-
         if return_codes:
             output_dict['z_q'] = z_q
             output_dict['quantized_codes'] = quantized_codes
@@ -372,6 +335,4 @@ def create_prism_from_config(config: Dict) -> PRISM:
         ema_decay=config.get('ema_decay', 0.99),
         beta=config.get('beta', 0.25),
         quantize_mode=QuantizeMode(config.get('quantize_mode', 'rotation')),
-        use_reliability_gate=config.get('use_reliability_gate', False),
-        gate_hidden_dim=config.get('gate_hidden_dim', 32),
     )

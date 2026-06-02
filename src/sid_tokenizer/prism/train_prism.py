@@ -2,7 +2,7 @@
 """
 PRISM Training Script
 
-Train Hierarchical ID VAE with IDE + MCD pipeline and optional SACO loss.
+Train Hierarchical ID VAE with IDE + CMA pipeline.
 """
 
 import os
@@ -43,7 +43,7 @@ except ImportError:
 
 
 class PRISMTrainer:
-    """Main trainer class for PRISM with IDE + MCD + SACO support."""
+    """Main trainer class for PRISM with IDE + CMA support."""
 
     def __init__(self, config: Dict[str, Any]):
         self.config = config
@@ -109,10 +109,6 @@ class PRISMTrainer:
         self.logger.info(f"Dataset loaded: {len(self.dataset)} items")
         self.logger.info(f"  Batch size: {batch_size}")
         self.logger.info(f"  Number of batches: {len(self.train_loader)}")
-        if self.dataset.has_cooc:
-            self.logger.info(f"  Co-occurrence graph: ENABLED")
-        else:
-            self.logger.info(f"  Co-occurrence graph: DISABLED (SACO will be skipped)")
 
     def setup_model(self):
         self.logger.info("Initializing PRISM model...")
@@ -125,7 +121,6 @@ class PRISMTrainer:
         self.logger.info(f"  Total parameters: {total_params:,}")
         self.logger.info(f"  Trainable parameters: {trainable_params:,}")
         self.logger.info(f"  IDE: {'ENABLED' if self.config.get('use_ide', True) else 'DISABLED'}")
-        self.logger.info(f"  Reliability Gate: {'ENABLED' if self.config.get('use_reliability_gate', False) else 'DISABLED'}")
 
         codebook_sizes = self.model.get_codebook_sizes()
         self.logger.info(f"  Codebook sizes per layer: {codebook_sizes}")
@@ -138,33 +133,10 @@ class PRISMTrainer:
         self.logger.info("Initializing optimizer and scheduler...")
         lr = self.config.get('learning_rate', 1e-3)
         weight_decay = self.config.get('weight_decay', 0.0)
-        gate_lr_mult = self.config.get('gate_lr_multiplier', 10.0)
-
-        # Separate parameter group for reliability gate: higher LR compensates
-        # for the long gradient path through encoder→decoder (UPR) and
-        # encoder (SACO) that attenuates the gate's gradient signal.
-        gate_params = []
-        other_params = []
-        for name, param in self.model.named_parameters():
-            if 'reliability_gate' in name:
-                gate_params.append(param)
-            else:
-                other_params.append(param)
-
-        param_groups = [
-            {'params': other_params, 'lr': lr},
-        ]
-        if gate_params:
-            param_groups.append({
-                'params': gate_params,
-                'lr': lr * gate_lr_mult,
-            })
-            self.logger.info(f"  Gate optimizer: {len(gate_params)} params, "
-                             f"lr={lr * gate_lr_mult:.1e} ({gate_lr_mult:.0f}x main LR)")
 
         self.optimizer = optim.AdamW(
-            param_groups,
-            lr=lr,  # default for groups without explicit lr
+            self.model.parameters(),
+            lr=lr,
             weight_decay=weight_decay,
             betas=(0.9, 0.999)
         )
@@ -201,17 +173,11 @@ class PRISMTrainer:
     def setup_loss(self):
         self.logger.info("Initializing loss function...")
 
-        use_saco = (
-            self.config.get('use_saco', False) and self.dataset.has_cooc
-        )
         use_cma = self.config.get('use_ide', True)
-
         commit_w = self.config.get('commit_weight', 0.0625)
+
         self.loss_fn = PRISMTotalLoss(
             commit_weight=commit_w,
-            use_saco=use_saco,
-            lambda_sac=self.config.get('lambda_sac', 0.1),
-            saco_temperature=self.config.get('saco_temperature', 0.07),
             use_cma=use_cma,
             lambda_cma=self.config.get('lambda_cma', 0.1),
             cma_temperature=self.config.get('cma_temperature', 0.07),
@@ -221,16 +187,11 @@ class PRISMTrainer:
         self.logger.info("Loss function initialized")
         self.logger.info(f"  UPR: MSE(z_dec, z_clean.detach()) — 256D unified reconstruction")
         self.logger.info(f"  Commit weight={commit_w}")
-        self.logger.info(f"  Loss: UPR + {commit_w}*commit + SACO + CMA")
+        self.logger.info(f"  Loss: UPR + {commit_w}*commit + CMA")
         self.logger.info(f"  CMA: {'ENABLED' if use_cma else 'DISABLED'}")
         if use_cma:
             self.logger.info(f"    λ_cma={self.config.get('lambda_cma', 0.1)}")
             self.logger.info(f"    τ_cma={self.config.get('cma_temperature', 0.07)}")
-        self.logger.info(f"  SACO: {'ENABLED' if use_saco else 'DISABLED'}")
-        if use_saco:
-            self.logger.info(f"    Target: {self.config.get('saco_target', 'z')}")
-            self.logger.info(f"    λ_sac={self.config.get('lambda_sac', 0.1)}")
-            self.logger.info(f"    τ_saco={self.config.get('saco_temperature', 0.07)}")
 
     def train_epoch(self, epoch: int) -> Dict[str, float]:
         self.model.train()
@@ -242,7 +203,6 @@ class PRISMTrainer:
         )
 
         for batch_idx, batch in enumerate(progress_bar):
-            # Anchor forward pass (full pipeline)
             content_emb = batch['content_emb'].to(self.device)
             collab_emb = batch['collab_emb'].to(self.device)
 
@@ -256,40 +216,8 @@ class PRISMTrainer:
             z_dec = outputs['z_dec']
             z_clean = outputs['z_clean']
             vq_loss = outputs['codebook_loss']
-            z_anchor = outputs['z']
-
-            # CMA inputs (raw IDE projections)
             h_t = outputs.get('h_t')
             h_c = outputs.get('h_c')
-
-            # Reliability gate alpha tracking
-            alpha = outputs.get('alpha')
-
-            # Positive encode for SACO (supports z, zq, or curriculum targets)
-            z_pos = None
-            saco_target = self.config.get('saco_target', 'z')
-            if self.loss_fn.use_saco:
-                pos_content = batch['pos_content_emb'].to(self.device)
-                pos_collab = batch['pos_collab_emb'].to(self.device)
-                pos_enc = self.model.encode(pos_content, pos_collab)
-                z_pos_cont = pos_enc['z']
-
-                if saco_target == 'zq':
-                    z_pos = self.model.quantize(z_pos_cont,
-                                                temperature=self._get_temperature(epoch))[0]
-                    z_anchor = outputs.get('z_q', outputs['z'])
-                elif saco_target == 'curriculum':
-                    # Curriculum: z → zq direction interpolation.
-                    # Early epochs: align on smooth continuous z.
-                    # Late epochs:  align on discrete z_q (direct codebook optimization).
-                    lam = self._get_curriculum_lambda(epoch)
-                    z_pos_q = self.model.quantize(z_pos_cont,
-                                                  temperature=self._get_temperature(epoch))[0]
-                    z_anchor_q = outputs.get('z_q', outputs['z'])
-                    z_anchor = self._interpolate_directions(outputs['z'], z_anchor_q, lam)
-                    z_pos = self._interpolate_directions(z_pos_cont, z_pos_q, lam)
-                else:
-                    z_pos = z_pos_cont
 
             total_loss, loss_dict = self.loss_fn(
                 z_dec=z_dec,
@@ -297,47 +225,7 @@ class PRISMTrainer:
                 commitment_loss=vq_loss,
                 h_t=h_t,
                 h_c=h_c,
-                z_anchor=z_anchor,
-                z_pos=z_pos,
             )
-
-            # Norm-guided gate prior: the raw collaborative embedding norm
-            # ||e_c|| correlates with training quality (ρ=0.84 with popularity)
-            # and provides a soft per-item reliability target.  Items with
-            # small ||e_c|| (cold-start) get a low-α prior; items with large
-            # ||e_c|| (popular) get a high-α prior.  λ=0.01 is intentionally
-            # weak — the gate can deviate when UPR/SACO provide strong evidence
-            # that contradicts the norm-based prior.
-            gate_guide_loss = torch.tensor(0.0, device=self.device)
-            if alpha is not None:
-                e_c_norm = collab_emb.norm(dim=-1, keepdim=True).detach()
-                n_min, n_max = e_c_norm.min(), e_c_norm.max()
-                norm_rel = (e_c_norm - n_min) / (n_max - n_min + 1e-8)
-                alpha_target = norm_rel * 0.6 + 0.2  # range [0.2, 0.8]
-                gate_guide_loss = nn.functional.mse_loss(
-                    alpha, alpha_target.detach()) * self.config.get('lambda_gate_guide', 0.01)
-                loss_dict['gate_guide'] = gate_guide_loss.item()
-                loss_dict['alpha_mean'] = alpha.mean().item()
-                loss_dict['alpha_std'] = alpha.std().item()
-                total_loss = total_loss + gate_guide_loss
-
-            # Codebook entropy regularisation: penalise low entropy in the
-            # EMA-tracked per-code usage distribution.  When SACO targets
-            # z_q, the contrastive objective can push encoder outputs toward
-            # a few dominant codes, causing codebook collapse.  This term
-            # encourages uniform code usage.  λ=0 disables (default);
-            # λ≈0.01 is recommended for --saco_target zq.
-            lambda_cb_ent = self.config.get('lambda_codebook_entropy', 0.0)
-            if lambda_cb_ent > 0:
-                cb_ent_loss = torch.tensor(0.0, device=self.device)
-                for q in self.model.quantizers:
-                    if hasattr(q, 'code_usage'):
-                        usage = q.code_usage / (q.code_usage.sum() + 1e-8)
-                        ent = -(usage * (usage + 1e-8).log()).sum()
-                        max_ent = np.log(q.n_embed)
-                        cb_ent_loss = cb_ent_loss + (max_ent - ent) / max_ent * lambda_cb_ent
-                total_loss = total_loss + cb_ent_loss
-                loss_dict['cb_entropy'] = cb_ent_loss.item()
 
             self.optimizer.zero_grad()
             total_loss.backward()
@@ -359,9 +247,6 @@ class PRISMTrainer:
             for i, perp in enumerate(outputs['perplexities']):
                 epoch_metrics[f'perplexity_layer{i+1}'] += perp
 
-            # alpha_mean/std already tracked via loss_dict below
-            # (set in gate_guide_loss block)
-
             postfix_dict = {
                 'loss': loss_dict['total_loss'],
                 'upr': loss_dict['upr'],
@@ -369,13 +254,6 @@ class PRISMTrainer:
             }
             if 'cma' in loss_dict:
                 postfix_dict['cma'] = loss_dict['cma']
-            if 'saco' in loss_dict:
-                postfix_dict['saco'] = loss_dict['saco']
-            if alpha is not None:
-                postfix_dict['a'] = alpha.mean().item()
-                postfix_dict['as'] = alpha.std().item()
-            if saco_target == 'curriculum' and self.loss_fn.use_saco:
-                postfix_dict['λ'] = self._get_curriculum_lambda(epoch)
             progress_bar.set_postfix(postfix_dict)
 
             self.global_step += 1
@@ -394,64 +272,11 @@ class PRISMTrainer:
         anneal_rate = self.config.get('anneal_rate', 0.00003)
         return max(min_temp, init_temp * np.exp(-anneal_rate * epoch))
 
-    def _get_curriculum_lambda(self, epoch: int) -> float:
-        """Linear schedule for z→zq curriculum: 0=pure z, 1=pure zq.
-
-        Before warmup_end: λ=0 (pure continuous z — stable gradients).
-        After warmup_end:  λ linearly increases from 0→1 over remaining epochs,
-                           interpolating the SACO target direction from smooth z
-                           toward discrete z_q.
-        """
-        warmup = self.config.get('saco_curriculum_warmup_epochs', 150)
-        total = self.config.get('epochs', 500)
-        if epoch <= warmup or total <= warmup:
-            return 0.0
-        # Linear from 0 at warmup to 1 at total
-        return min(1.0, (epoch - warmup) / max(1, total - warmup))
-
-    @staticmethod
-    def _interpolate_directions(z_cont: torch.Tensor, z_quant: torch.Tensor,
-                                lam: float) -> torch.Tensor:
-        """Interpolate between continuous and quantized latent directions.
-
-        Both z_cont and z_quant are L2-normalised, then linearly blended
-        and re-normalised. This keeps the SACO input on the unit sphere
-        regardless of the norm difference between z (~2.3) and z_q (~0.9).
-
-        Args:
-            z_cont:  Continuous latent  (B, d)
-            z_quant: Quantized latent   (B, d)
-            lam:     Interpolation weight ∈ [0,1]  (0=pure z_cont, 1=pure z_quant)
-
-        Returns:
-            Interpolated direction (B, d), L2-normalised.
-        """
-        if lam <= 0.0:
-            return z_cont
-        if lam >= 1.0:
-            return z_quant
-        zc = torch.nn.functional.normalize(z_cont, p=2, dim=-1)
-        zq = torch.nn.functional.normalize(z_quant, p=2, dim=-1)
-        blended = (1.0 - lam) * zc + lam * zq
-        return torch.nn.functional.normalize(blended, p=2, dim=-1)
-
     def _update_early_stopping(self, metrics: Dict[str, float], epoch: int) -> Tuple[bool, bool]:
         patience = self.config.get('early_stop_patience', float('inf'))
         if not np.isfinite(patience):
             self._update_perplexity_guard(metrics)
             return False, False
-
-        # During curriculum z→zq transition (0 < λ < 1), the SACO target
-        # is shifting, which naturally increases loss.  Freeze the patience
-        # counter so the model can navigate the transition without triggering
-        # early stop.
-        saco_target = self.config.get('saco_target', 'z')
-        if saco_target == 'curriculum':
-            lam = self._get_curriculum_lambda(epoch)
-            if 0.0 < lam < 1.0:
-                self.patience_counter = 0
-                self._update_perplexity_guard(metrics)
-                return False, False
 
         min_delta = self.config.get('early_stop_min_delta', 1e-4)
         total_loss = metrics.get('total_loss', float('inf'))
@@ -1019,14 +844,6 @@ class PRISMTrainer:
 
             if 'cma' in train_metrics:
                 self.logger.info(f"  CMA Loss: {train_metrics['cma']:.4f}")
-            if 'saco' in train_metrics:
-                saco_tgt = self.config.get('saco_target', 'z')
-                self.logger.info(f"  SACO Loss ({saco_tgt}): {train_metrics['saco']:.4f}")
-            if 'alpha_mean' in train_metrics:
-                self.logger.info(f"  α (reliability gate): mean={train_metrics['alpha_mean']:.4f} "
-                                 f"std={train_metrics.get('alpha_std', 0):.4f}")
-            if 'cb_entropy' in train_metrics:
-                self.logger.info(f"  CB Entropy Reg: {train_metrics['cb_entropy']:.6f}")
 
             for key, value in train_metrics.items():
                 self.train_history[key].append(value)
@@ -1132,7 +949,7 @@ class PRISMTrainer:
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='Train PRISM with IDE + MCD + SACO')
+    parser = argparse.ArgumentParser(description='Train PRISM with IDE + CMA')
 
     # Data arguments
     parser.add_argument('--data_path', type=str, required=True,
@@ -1160,32 +977,6 @@ def parse_args():
                         help='Enable/disable IDE (default: on). Ablation: --ide off')
     parser.add_argument('--ide_dim', type=int, default=128,
                         help='IDE projection dimension (default: 128)')
-
-    # SACO arguments
-    parser.add_argument('--use_saco', action='store_true',
-                        help='Enable Sequence-Aware Contrastive Objective')
-    parser.add_argument('--lambda_sac', type=float, default=0.1,
-                        help='Weight for SACO loss')
-    parser.add_argument('--saco_temperature', type=float, default=0.07,
-                        help='Temperature for SACO contrastive loss')
-    parser.add_argument('--saco_target', type=str, default='z',
-                        choices=['z', 'zq', 'curriculum'],
-                        help='SACO alignment target: z (continuous), zq (quantized), '
-                             'or curriculum (z→zq direction interpolation)')
-    parser.add_argument('--saco_curriculum_warmup_epochs', type=int, default=150,
-                        help='Epochs of pure z before linear z→zq transition '
-                             '(only used with --saco_target curriculum)')
-
-    # Reliability Gate arguments
-    parser.add_argument('--use_reliability_gate', action='store_true',
-                        help='Enable modality reliability gate (learns per-item collab trust)')
-    parser.add_argument('--gate_hidden_dim', type=int, default=32,
-                        help='Hidden dimension for reliability gate MLP')
-    parser.add_argument('--gate_lr_multiplier', type=float, default=10.0,
-                        help='LR multiplier for gate params vs main model (default: 10x)')
-    parser.add_argument('--lambda_gate_guide', type=float, default=0.01,
-                        help='Weight for norm-guided gate prior (soft target: α ∝ ||e_c||). '
-                             'Weak enough that UPR/SACO can override when evidence contradicts.')
 
     # CMA arguments
     parser.add_argument('--lambda_cma', type=float, default=0.1,
@@ -1219,11 +1010,6 @@ def parse_args():
     parser.add_argument('--quantize_mode', type=str, default='rotation',
                         choices=['ste', 'rotation', 'gumbel_softmax'],
                         help='Quantization mode')
-    parser.add_argument('--lambda_codebook_entropy', type=float, default=0.0,
-                        help='Codebook entropy regularizer weight (0=disabled). '
-                             'Recommended 0.01 for --saco_target zq to prevent '
-                             'codebook collapse.')
-
     # Scheduler arguments
     parser.add_argument('--use_scheduler', action='store_true',
                         help='Use learning rate scheduler')

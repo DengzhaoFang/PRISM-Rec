@@ -97,33 +97,9 @@ BASE_TRAIN_ARGS = [
 ]
 
 EXPERIMENT_GROUPS = [
-    ("CMA+SACO vs Gate+SACO(z/zq/curriculum)", [
-        # A: CMA + SACO baseline
-        ("cma_saco_z",
-         ["--use_saco", "--lambda_sac", "0.1",
-          "--lambda_cma", "0.1"]),
-
-        # B: CMA + Reliability Gate + SACO(z)
-        ("cma_gate_saco_z",
-         ["--use_saco", "--lambda_sac", "0.1",
-          "--lambda_cma", "0.1",
-          "--use_reliability_gate", "--gate_hidden_dim", "32"]),
-
-        # C: CMA + Reliability Gate + SACO(zq)
-        ("cma_gate_saco_zq",
-         ["--use_saco", "--lambda_sac", "0.1",
-          "--lambda_cma", "0.1",
-          "--use_reliability_gate", "--gate_hidden_dim", "32",
-          "--saco_target", "zq",
-          "--lambda_codebook_entropy", "0.01"]),
-
-        # D: CMA + Reliability Gate + SACO(curriculum z→zq)
-        ("cma_gate_saco_curriculum",
-         ["--use_saco", "--lambda_sac", "0.1",
-          "--lambda_cma", "0.1",
-          "--use_reliability_gate", "--gate_hidden_dim", "32",
-          "--saco_target", "curriculum",
-          "--saco_curriculum_warmup_epochs", "150"]),
+    ("CMA Baseline", [
+        ("cma_only",
+         ["--lambda_cma", "0.1"]),
     ]),
 ]
 
