@@ -110,6 +110,42 @@ class PRISMTrainer:
         self.logger.info(f"  Batch size: {batch_size}")
         self.logger.info(f"  Number of batches: {len(self.train_loader)}")
 
+        # PA-SCL prior (Stage 2): precompute T(i,j) soft targets
+        use_pa_scl = self.config.get('use_pa_scl', False)
+        if use_pa_scl:
+            import pandas as pd
+            from pa_scl_prior import TopologySemanticPrior, build_item_neighbor_graph
+            from collections import Counter
+
+            emb_path = Path(data_dir) / 'item_emb.parquet'
+            train_path = Path(data_dir) / 'train.parquet'
+            item_df = pd.read_parquet(emb_path)
+            train_df = pd.read_parquet(train_path)
+
+            raw_text = np.stack([np.array(emb, dtype=np.float32) for emb in item_df['embedding']])
+            sequences = [list(row['history'])+[row['target']] for _, row in train_df.iterrows()]
+            item_neighbors = build_item_neighbor_graph(sequences)
+
+            self.pa_scl_prior = TopologySemanticPrior(
+                raw_text_emb=raw_text,
+                item_ids=item_df['ItemID'].values,
+                user_item_graph=item_neighbors,
+                text_sharpen_gamma=self.config.get('text_sharpen_gamma', 3.0),
+                graph_scale_beta=self.config.get('graph_scale_beta', 0.05),
+            )
+
+            self.item_pop = Counter()
+            for _, row in train_df.iterrows():
+                for iid in list(row['history'])+[row['target']]:
+                    self.item_pop[int(iid)] += 1
+
+            self.logger.info(f"  PA-SCL prior: {len(item_df)} items, "
+                             f"γ={self.config.get('text_sharpen_gamma',3.0)}, "
+                             f"β={self.config.get('graph_scale_beta',0.05)}")
+        else:
+            self.pa_scl_prior = None
+            self.item_pop = {}
+
     def setup_model(self):
         self.logger.info("Initializing PRISM model...")
         self.model = create_prism_from_config(config=self.config)
@@ -173,8 +209,24 @@ class PRISMTrainer:
     def setup_loss(self):
         self.logger.info("Initializing loss function...")
 
-        use_cma = self.config.get('use_ide', True)
+        use_pa_scl = self.config.get('use_pa_scl', False)
+        use_cma = self.config.get('use_ide', True) and not use_pa_scl
+        use_dual_head = self.config.get('use_dual_head', False)
         commit_w = self.config.get('commit_weight', 0.0625)
+
+        # Validate mutual exclusivity
+        if use_pa_scl:
+            from pa_scl_loss import validate_mutual_exclusivity
+            validate_mutual_exclusivity(use_pa_scl=True, use_cma=use_cma)
+            from pa_scl_loss import PA_SCL_Loss
+            self.pa_scl_loss = PA_SCL_Loss(
+                temperature=self.config.get('pa_scl_temperature', 0.07),
+            ).to(self.device)
+            self.logger.info(f"  PA-SCL: ENABLED (replaces CMA)")
+            self.logger.info(f"    τ={self.config.get('pa_scl_temperature', 0.07)}")
+            self.cma_loss = None  # CMA disabled
+        else:
+            self.pa_scl_loss = None
 
         self.loss_fn = PRISMTotalLoss(
             commit_weight=commit_w,
@@ -182,16 +234,22 @@ class PRISMTrainer:
             lambda_cma=self.config.get('lambda_cma', 0.1),
             cma_temperature=self.config.get('cma_temperature', 0.07),
         )
-
         self.loss_fn = self.loss_fn.to(self.device)
+
+        # Dual-head UPR
+        if use_dual_head:
+            from dual_head_decoder import DualHeadUPRLoss
+            self.dual_upr_loss = DualHeadUPRLoss(
+                use_pop_weight=self.config.get('dual_head_pop_weight', True),
+            ).to(self.device)
+        else:
+            self.dual_upr_loss = None
+
         self.logger.info("Loss function initialized")
-        self.logger.info(f"  UPR: MSE(z_dec, z_clean.detach()) — 256D unified reconstruction")
+        self.logger.info(f"  UPR: {'Dual-Head (h_t+h_c)' if use_dual_head else 'Single (z_clean)'}")
         self.logger.info(f"  Commit weight={commit_w}")
-        self.logger.info(f"  Loss: UPR + {commit_w}*commit + CMA")
-        self.logger.info(f"  CMA: {'ENABLED' if use_cma else 'DISABLED'}")
-        if use_cma:
-            self.logger.info(f"    λ_cma={self.config.get('lambda_cma', 0.1)}")
-            self.logger.info(f"    τ_cma={self.config.get('cma_temperature', 0.07)}")
+        align_name = 'PA-SCL' if use_pa_scl else ('CMA' if use_cma else 'None')
+        self.logger.info(f"  Alignment: {align_name}")
 
     def train_epoch(self, epoch: int) -> Dict[str, float]:
         self.model.train()
@@ -213,19 +271,54 @@ class PRISMTrainer:
                 return_codes=True,
             )
 
-            z_dec = outputs['z_dec']
             z_clean = outputs['z_clean']
             vq_loss = outputs['codebook_loss']
             h_t = outputs.get('h_t')
             h_c = outputs.get('h_c')
 
-            total_loss, loss_dict = self.loss_fn(
-                z_dec=z_dec,
-                z_clean=z_clean,
-                commitment_loss=vq_loss,
-                h_t=h_t,
-                h_c=h_c,
-            )
+            # UPR: dual-head or single-head
+            use_dual_head = self.config.get('use_dual_head', False)
+            if use_dual_head:
+                from dual_head_decoder import DualHeadUPRLoss
+                pop = torch.tensor(
+                    [self.dataset.item_id_to_idx.get(int(iid), 0)
+                     for iid in batch['item_id'].numpy()],
+                    device=self.device, dtype=torch.float32)
+                upr_loss, upr_dict = self._dual_upr_loss(
+                    outputs['h_t_hat'], outputs['h_c_hat'], h_t, h_c, pop)
+                loss_upr = upr_loss
+                loss_dict = {**upr_dict}
+                # Add CMA or PA-SCL
+                extra = torch.tensor(0.0, device=self.device)
+                if self.loss_fn.cma_loss is not None and h_t is not None:
+                    loss_cma = self.loss_fn.cma_loss(h_t, h_c)
+                    extra = extra + self.loss_fn.lambda_cma * loss_cma
+                    loss_dict['cma'] = loss_cma.item()
+                if vq_loss is not None:
+                    extra = extra + self.loss_fn.commit_weight * vq_loss
+                    loss_dict['commitment'] = vq_loss.item()
+                total_loss = loss_upr + extra
+                loss_dict['total_loss'] = total_loss.item()
+            else:
+                total_loss, loss_dict = self.loss_fn(
+                    z_dec=outputs['z_dec'],
+                    z_clean=z_clean,
+                    commitment_loss=vq_loss,
+                    h_t=h_t,
+                    h_c=h_c,
+                )
+
+            # PA-SCL: replaces CMA with topology-aware soft contrastive loss
+            if self.pa_scl_loss is not None:
+                T = self.pa_scl_prior.compute_T(batch['item_id'].numpy()).to(self.device)
+                pop = torch.tensor(
+                    [self.item_pop.get(int(iid), 0) for iid in batch['item_id'].numpy()],
+                    device=self.device, dtype=torch.float32)
+                pa_loss, pa_dict = self.pa_scl_loss(h_t, h_c, T, pop)
+                total_loss = total_loss + pa_loss  # no λ multiplier — PA-SCL replaces CMA
+                loss_dict.update(pa_dict)
+                # Remove CMA from loss_dict if present (PA-SCL replaces it)
+                loss_dict.pop('cma', None)
 
             self.optimizer.zero_grad()
             total_loss.backward()
@@ -263,6 +356,10 @@ class PRISMTrainer:
 
         self.prev_epoch_metrics = epoch_metrics
         return epoch_metrics
+
+    def _dual_upr_loss(self, h_t_hat, h_c_hat, h_t, h_c, pop):
+        """Wrapper for DualHeadUPRLoss."""
+        return self.dual_upr_loss(h_t_hat, h_c_hat, h_t, h_c, pop)
 
     def _get_temperature(self, epoch: int) -> float:
         if self.config.get('quantize_mode', 'rotation') != 'gumbel_softmax':
@@ -844,6 +941,23 @@ class PRISMTrainer:
 
             if 'cma' in train_metrics:
                 self.logger.info(f"  CMA Loss: {train_metrics['cma']:.4f}")
+            if 'pa_scl' in train_metrics:
+                self.logger.info(f"  PA-SCL Loss: {train_metrics['pa_scl']:.4f}")
+                self.logger.info(f"    mean_KL={train_metrics.get('mean_kl',0):.4f} "
+                                 f"cold→hot={train_metrics.get('w_cold2hot',0):.4f} "
+                                 f"hot→cold={train_metrics.get('w_hot2cold',0):.4f}")
+                self.logger.info(f"    Q_ent={train_metrics.get('q_entropy',0):.3f} "
+                                 f"top1={train_metrics.get('top1_match',0):.4f} "
+                                 f"w_mean={train_metrics.get('w_mean',0):.4f}")
+            if 'upr_t' in train_metrics:
+                self.logger.info(f"  UPR_t: {train_metrics['upr_t']:.4f}  "
+                                 f"UPR_c: {train_metrics['upr_c']:.4f}  "
+                                 f"w_c: {train_metrics.get('w_c_mean',0):.4f}")
+            if self.pa_scl_prior is not None:
+                cs = self.pa_scl_prior.cache_stats
+                total = cs['hits'] + cs['misses']
+                hit_rate = cs['hits'] / max(total, 1) * 100
+                self.logger.info(f"  Jaccard cache: {cs['hits']}/{total} hits ({hit_rate:.1f}%)")
 
             for key, value in train_metrics.items():
                 self.train_history[key].append(value)
@@ -977,6 +1091,24 @@ def parse_args():
                         help='Enable/disable IDE (default: on). Ablation: --ide off')
     parser.add_argument('--ide_dim', type=int, default=128,
                         help='IDE projection dimension (default: 128)')
+
+    # PA-SCL arguments (replaces CMA)
+    parser.add_argument('--use_pa_scl', action='store_true',
+                        help='Enable PA-SCL (asymmetric soft contrastive loss). '
+                             'Mutually exclusive with CMA.')
+    parser.add_argument('--pa_scl_temperature', type=float, default=0.07,
+                        help='Temperature for PA-SCL softmax')
+    parser.add_argument('--text_sharpen_gamma', type=float, default=3.0,
+                        help='Text similarity sharpening exponent for PA-SCL prior')
+    parser.add_argument('--graph_scale_beta', type=float, default=0.05,
+                        help='Graph similarity amplification threshold for PA-SCL prior')
+
+    # Dual-Head Decoder arguments
+    parser.add_argument('--use_dual_head', action='store_true',
+                        help='Enable dual-head decoder (separate heads for h_t/h_c)')
+    parser.add_argument('--dual_head_pop_weight', type=str, default='true',
+                        choices=['true', 'false'],
+                        help='Use popularity-weighted MSE for collab head')
 
     # CMA arguments
     parser.add_argument('--lambda_cma', type=float, default=0.1,
