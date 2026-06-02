@@ -220,10 +220,10 @@ class PRISMTrainer:
             validate_mutual_exclusivity(use_pa_scl=True, use_cma=use_cma)
             from pa_scl_loss import PA_SCL_Loss
             self.pa_scl_loss = PA_SCL_Loss(
-                temperature=self.config.get('pa_scl_temperature', 0.07),
+                temperature=self.config.get('pa_scl_temperature', 0.2),
             ).to(self.device)
             self.logger.info(f"  PA-SCL: ENABLED (replaces CMA)")
-            self.logger.info(f"    τ={self.config.get('pa_scl_temperature', 0.07)}")
+            self.logger.info(f"    τ={self.config.get('pa_scl_temperature', 0.2)}")
             self.cma_loss = None  # CMA disabled
         else:
             self.pa_scl_loss = None
@@ -315,7 +315,8 @@ class PRISMTrainer:
                     [self.item_pop.get(int(iid), 0) for iid in batch['item_id'].numpy()],
                     device=self.device, dtype=torch.float32)
                 pa_loss, pa_dict = self.pa_scl_loss(h_t, h_c, T, pop)
-                total_loss = total_loss + pa_loss  # no λ multiplier — PA-SCL replaces CMA
+                lambda_pa = self.config.get('lambda_pa_scl', 0.1)
+                total_loss = total_loss + lambda_pa * pa_loss
                 loss_dict.update(pa_dict)
                 # Remove CMA from loss_dict if present (PA-SCL replaces it)
                 loss_dict.pop('cma', None)
@@ -1090,8 +1091,10 @@ def parse_args():
     parser.add_argument('--use_pa_scl', action='store_true',
                         help='Enable PA-SCL (asymmetric soft contrastive loss). '
                              'Mutually exclusive with CMA.')
-    parser.add_argument('--pa_scl_temperature', type=float, default=0.07,
-                        help='Temperature for PA-SCL softmax')
+    parser.add_argument('--pa_scl_temperature', type=float, default=0.2,
+                        help='Temperature for PA-SCL softmax (higher=softer P distribution)')
+    parser.add_argument('--lambda_pa_scl', type=float, default=0.1,
+                        help='Weight for PA-SCL loss (default 0.1, same scale as CMA)')
     parser.add_argument('--text_sharpen_gamma', type=float, default=3.0,
                         help='Text similarity sharpening exponent for PA-SCL prior')
     parser.add_argument('--graph_scale_beta', type=float, default=0.05,
