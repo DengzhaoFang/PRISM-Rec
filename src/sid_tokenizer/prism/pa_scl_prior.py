@@ -56,11 +56,11 @@ class TopologySemanticPrior:
         self.text_gamma = text_sharpen_gamma
         self.graph_beta = graph_scale_beta
 
-        # ── Fast vectorised graph lookup via sparse tensor ──
-        # Build a sparse (N_items × N_items) tensor of normalised cooc counts.
-        # Per-batch: index_select gives the B×B submatrix — fully vectorised.
+        # ── Fast graph lookup: build dense N×N matrix, extract B×B via indexing ──
+        # 12101² × 4 bytes = 585 MB float32 — trivial for modern GPUs.
+        # Dense indexing is orders of magnitude faster than sparse index_select.
         self._cooc_max = 1
-        self._S_graph_sparse: Optional[torch.Tensor] = None
+        self._S_graph: Optional[torch.Tensor] = None
         if cooc_counts is not None:
             n_items = len(item_ids)
             self._cooc_max = max(cooc_counts.values()) if cooc_counts else 1
@@ -74,8 +74,9 @@ class TopologySemanticPrior:
             if vals:
                 indices = torch.tensor([idx_i, idx_j], dtype=torch.long)
                 values = torch.tensor(vals, dtype=torch.float32) / self._cooc_max
-                self._S_graph_sparse = torch.sparse_coo_tensor(
+                sparse = torch.sparse_coo_tensor(
                     indices, values, (n_items, n_items)).coalesce()
+                self._S_graph = sparse.to_dense()  # (N, N) float32, ~585MB
 
         # Cache L2-normalised text embeddings for fast cosine
         self.text_norm = torch.nn.functional.normalize(
@@ -140,17 +141,15 @@ class TopologySemanticPrior:
     @torch.no_grad()
     def _compute_S_graph_raw(self, batch_item_ids: np.ndarray) -> torch.Tensor:
         """
-        Extract B×B submatrix from precomputed sparse cooc tensor.
-        Fully vectorised — zero Python for-loops.
+        Extract B×B submatrix from precomputed dense graph tensor.
+        Dense indexing is O(B²) in contiguous memory — near-zero overhead.
         """
-        if self._S_graph_sparse is None:
+        if self._S_graph is None:
             return torch.zeros(len(batch_item_ids), len(batch_item_ids))
         indices = torch.tensor(
             [self.item_id_to_idx[int(iid)] for iid in batch_item_ids],
             dtype=torch.long)
-        # index_select both dimensions of the sparse matrix
-        sub = self._S_graph_sparse.index_select(0, indices).index_select(1, indices)
-        return sub.to_dense()
+        return self._S_graph[indices][:, indices]
 
     @torch.no_grad()
     def _compute_graph_amplified(self, batch_item_ids: np.ndarray) -> torch.Tensor:
