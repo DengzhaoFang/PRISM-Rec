@@ -41,6 +41,7 @@ class TopologySemanticPrior:
         raw_text_emb: np.ndarray,
         item_ids: np.ndarray,
         user_item_graph: Optional[Dict[int, Set[int]]] = None,
+        cooc_counts: Optional[Dict[Tuple[int, int], int]] = None,
         text_percentile_lo: float = 1.0,
         text_percentile_hi: float = 99.0,
         text_sharpen_gamma: float = 3.0,
@@ -55,22 +56,30 @@ class TopologySemanticPrior:
         self.text_gamma = text_sharpen_gamma
         self.graph_beta = graph_scale_beta
 
-        # ── Convert Python sets → sorted numpy int32 arrays (much faster) ──
-        self.neighbor_arr: Dict[int, np.ndarray] = {}
-        if user_item_graph is not None:
-            for iid in item_ids:
-                nbrs = user_item_graph.get(int(iid), set())
-                self.neighbor_arr[int(iid)] = np.fromiter(
-                    nbrs, dtype=np.int32, count=len(nbrs))
-                self.neighbor_arr[int(iid)].sort()
-        self._jaccard_cache: Dict[Tuple[int, int], float] = {}
+        # ── Fast vectorised graph lookup via sparse tensor ──
+        # Build a sparse (N_items × N_items) tensor of normalised cooc counts.
+        # Per-batch: index_select gives the B×B submatrix — fully vectorised.
+        self._cooc_max = 1
+        self._S_graph_sparse: Optional[torch.Tensor] = None
+        if cooc_counts is not None:
+            n_items = len(item_ids)
+            self._cooc_max = max(cooc_counts.values()) if cooc_counts else 1
+            idx_i, idx_j, vals = [], [], []
+            for (a, b), cnt in cooc_counts.items():
+                ia, ib = self.item_id_to_idx.get(a), self.item_id_to_idx.get(b)
+                if ia is not None and ib is not None:
+                    idx_i.extend([ia, ib])
+                    idx_j.extend([ib, ia])
+                    vals.extend([cnt, cnt])
+            if vals:
+                indices = torch.tensor([idx_i, idx_j], dtype=torch.long)
+                values = torch.tensor(vals, dtype=torch.float32) / self._cooc_max
+                self._S_graph_sparse = torch.sparse_coo_tensor(
+                    indices, values, (n_items, n_items)).coalesce()
 
         # Cache L2-normalised text embeddings for fast cosine
         self.text_norm = torch.nn.functional.normalize(
             self.raw_text_emb, p=2, dim=-1)
-
-        self._cache_hits = 0
-        self._cache_misses = 0
 
     # ── Public API ──────────────────────────────────────────────────
 
@@ -99,10 +108,6 @@ class TopologySemanticPrior:
     def compute_S_graph_amplified(self, batch_item_ids: np.ndarray) -> torch.Tensor:
         return self._compute_graph_amplified(batch_item_ids)
 
-    @property
-    def cache_stats(self) -> Dict[str, int]:
-        return {'hits': self._cache_hits, 'misses': self._cache_misses}
-
     # ── Internal: text (unchanged, already vectorised) ──────────────
 
     def _ids_to_indices(self, item_ids: np.ndarray) -> List[int]:
@@ -130,43 +135,22 @@ class TopologySemanticPrior:
             S_norm = S_norm ** self.text_gamma
         return S_norm
 
-    # ── Internal: graph (optimised with numpy + LRU cache) ──────────
-
-    def _get_jaccard(self, id_i: int, id_j: int) -> float:
-        """Cached Jaccard lookup using numpy intersect1d."""
-        key = (min(id_i, id_j), max(id_i, id_j))
-        val = self._jaccard_cache.get(key)
-        if val is not None:
-            self._cache_hits += 1
-            return val
-
-        self._cache_misses += 1
-        arr_i = self.neighbor_arr.get(id_i)
-        arr_j = self.neighbor_arr.get(id_j)
-        if arr_i is None or arr_j is None or len(arr_i) == 0 or len(arr_j) == 0:
-            val = 0.0
-        else:
-            inter = np.intersect1d(arr_i, arr_j, assume_unique=True).size
-            union = arr_i.size + arr_j.size - inter
-            val = inter / union if union > 0 else 0.0
-        self._jaccard_cache[key] = val
-        return val
+    # ── Internal: graph (vectorised sparse index_select) ────────────
 
     @torch.no_grad()
     def _compute_S_graph_raw(self, batch_item_ids: np.ndarray) -> torch.Tensor:
-        """Jaccard similarity with numpy arrays + LRU cache."""
-        B = len(batch_item_ids)
-        S = torch.zeros(B, B)
-        if not self.neighbor_arr:
-            return S
-        ids = [int(x) for x in batch_item_ids]
-        for i in range(B):
-            for j in range(i + 1, B):
-                val = self._get_jaccard(ids[i], ids[j])
-                if val > 0:
-                    S[i, j] = val
-                    S[j, i] = val
-        return S
+        """
+        Extract B×B submatrix from precomputed sparse cooc tensor.
+        Fully vectorised — zero Python for-loops.
+        """
+        if self._S_graph_sparse is None:
+            return torch.zeros(len(batch_item_ids), len(batch_item_ids))
+        indices = torch.tensor(
+            [self.item_id_to_idx[int(iid)] for iid in batch_item_ids],
+            dtype=torch.long)
+        # index_select both dimensions of the sparse matrix
+        sub = self._S_graph_sparse.index_select(0, indices).index_select(1, indices)
+        return sub.to_dense()
 
     @torch.no_grad()
     def _compute_graph_amplified(self, batch_item_ids: np.ndarray) -> torch.Tensor:
@@ -181,8 +165,14 @@ class TopologySemanticPrior:
 def build_item_neighbor_graph(
     train_sequences: List[List[int]],
     min_cooc: int = 0,
-) -> Dict[int, Set[int]]:
-    """Build item→neighbors dict from user interaction sequences."""
+) -> Tuple[Dict[int, Set[int]], Dict[Tuple[int, int], int]]:
+    """
+    Build item→neighbors dict AND cooc-count dict from sequences.
+
+    Returns:
+        neighbors:  Dict[item_id, Set[neighbor_ids]]
+        cooc_dict:  Dict[(min_id, max_id), raw_cooc_count]
+    """
     cooc = defaultdict(lambda: defaultdict(int))
     for seq in train_sequences:
         for i in range(len(seq)):
@@ -192,9 +182,14 @@ def build_item_neighbor_graph(
                     cooc[a][b] += 1
                     cooc[b][a] += 1
     neighbors = {}
+    cooc_dict = {}
     for item, nbrs in cooc.items():
         if min_cooc > 0:
             neighbors[item] = {n for n, cnt in nbrs.items() if cnt >= min_cooc}
         else:
             neighbors[item] = set(nbrs.keys())
-    return neighbors
+        for nbr, cnt in nbrs.items():
+            if cnt >= min_cooc:
+                key = (min(item, nbr), max(item, nbr))
+                cooc_dict[key] = cnt
+    return neighbors, cooc_dict

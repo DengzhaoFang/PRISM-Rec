@@ -124,12 +124,12 @@ class PRISMTrainer:
 
             raw_text = np.stack([np.array(emb, dtype=np.float32) for emb in item_df['embedding']])
             sequences = [list(row['history'])+[row['target']] for _, row in train_df.iterrows()]
-            item_neighbors = build_item_neighbor_graph(sequences)
+            item_neighbors, cooc_counts = build_item_neighbor_graph(sequences)
 
             self.pa_scl_prior = TopologySemanticPrior(
                 raw_text_emb=raw_text,
                 item_ids=item_df['ItemID'].values,
-                user_item_graph=item_neighbors,
+                cooc_counts=cooc_counts,
                 text_sharpen_gamma=self.config.get('text_sharpen_gamma', 3.0),
                 graph_scale_beta=self.config.get('graph_scale_beta', 0.05),
             )
@@ -953,12 +953,6 @@ class PRISMTrainer:
                 self.logger.info(f"  UPR_t: {train_metrics['upr_t']:.4f}  "
                                  f"UPR_c: {train_metrics['upr_c']:.4f}  "
                                  f"w_c: {train_metrics.get('w_c_mean',0):.4f}")
-            if self.pa_scl_prior is not None:
-                cs = self.pa_scl_prior.cache_stats
-                total = cs['hits'] + cs['misses']
-                hit_rate = cs['hits'] / max(total, 1) * 100
-                self.logger.info(f"  Jaccard cache: {cs['hits']}/{total} hits ({hit_rate:.1f}%)")
-
             for key, value in train_metrics.items():
                 self.train_history[key].append(value)
 
