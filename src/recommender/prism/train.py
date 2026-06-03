@@ -384,6 +384,8 @@ Examples:
     parser.add_argument('--use_purified_predictor', action='store_true')
     parser.add_argument('--purified_predictor_weight', type=float, default=0.1)
     parser.add_argument('--eval_every_n_epochs', type=int, default=None)
+    parser.add_argument('--log_clean', action='store_true',
+                        help='Log clean metrics without extra tags')
 
     return parser.parse_args()
 
