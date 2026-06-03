@@ -310,6 +310,7 @@ class MoEFusion(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
         return_stats: bool = False,
         teacher: Optional[torch.Tensor] = None,
+        **kwargs,  # accept extra args from newer calling code
     ) -> Tuple[torch.Tensor, Optional[Dict]]:
         if self.router_type == "dense":
             return self._dense_forward(id_emb, purified_content, purified_collab,
