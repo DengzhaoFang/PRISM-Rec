@@ -403,9 +403,9 @@ def get_beauty_config(
         Dictionary containing all configurations
     """
     default_paths = {
-        'sequence_data_path': "dataset/Amazon-Beauty/processed/beauty-prism-sentenceT5base/Beauty",
+        'sequence_data_path': "dataset/Amazon-Beauty/processed/beauty-tiger-sentenceT5base/Beauty",
         'semantic_mapping_path': "scripts/output/prism_tokenizer/beauty/3-256-32-ema-only-5-core-items/semantic_id_mappings.json",
-        'collab_embedding_path': "dataset/Amazon-Beauty/processed/beauty-prism-sentenceT5base/Beauty/lightgcn/item_embeddings_collab.npy"
+        'collab_embedding_path': "dataset/Amazon-Beauty/processed/beauty-tiger-sentenceT5base/Beauty/lightgcn/item_embeddings_collab.npy"
     }
     
     return _create_dataset_config(
