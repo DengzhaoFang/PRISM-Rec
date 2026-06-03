@@ -80,6 +80,11 @@ class PA_SCL_Loss(nn.Module):
         B = h_t.size(0)
         device = h_t.device
 
+        # 0. L2-normalise — IDE outputs have norms ~11.3, causing softmax
+        #    underflow without normalisation.  Standard for contrastive loss.
+        h_t = F.normalize(h_t, p=2, dim=-1)
+        h_c = F.normalize(h_c, p=2, dim=-1)
+
         # 1. Popularity weights for asymmetric mask
         w = self._compute_pop_weights(item_popularities, device)  # (B,)
 
@@ -95,15 +100,17 @@ class PA_SCL_Loss(nn.Module):
         I = torch.eye(B, device=device)
         T_asym = T * (1.0 - I) * W_mask + I  # (B, B)
 
-        # 4. Top-K sparse truncation (adaptive — no absolute thresholds)
-        #    Only keep the K strongest off-diagonal targets per row.
-        #    K is relative to batch size, not dataset-specific magnitudes.
+        # 4. Top-K sparse truncation on raw T (BEFORE W_mask weighting).
+        #    This ensures we always have K meaningful targets regardless
+        #    of how small the W_mask-weighted values become.  W_mask is
+        #    then applied ONLY to the selected Top-K positions.
         K = min(self.topk_K, B - 1)
-        _, topk_idx = torch.topk(T_asym, k=K, dim=-1)
-        topk_mask = torch.zeros_like(T_asym).scatter_(-1, topk_idx, 1.0)
-        T_asym = T_asym * topk_mask
-        # Force diagonal = 1.0 (self-alignment always preserved)
-        T_asym = torch.where(I.bool(), torch.ones_like(T_asym), T_asym)
+        # Top-K on raw T (off-diagonal only — exclude diag to avoid trivial selection)
+        T_off = T * (1.0 - I)
+        _, topk_idx = torch.topk(T_off, k=K, dim=-1)
+        topk_mask = torch.zeros_like(T_off).scatter_(-1, topk_idx, 1.0)
+        # Apply W_mask only to selected Top-K off-diagonal targets
+        T_asym = T_off * topk_mask * W_mask + I  # diag=1.0 preserved
 
         # 5. Bidirectional KL to preserve uniform space (prevents collapse)
         sim = (h_t @ h_c.T) / self.temperature
