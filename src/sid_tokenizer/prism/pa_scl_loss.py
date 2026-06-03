@@ -76,47 +76,50 @@ class PA_SCL_Loss(nn.Module):
         B = h_t.size(0)
         device = h_t.device
 
-        # 1. Similarity matrix → log-softmax for KL
-        sim = (h_t @ h_c.T) / self.temperature  # (B, B)
-        log_P = F.log_softmax(sim, dim=-1)  # (B, B)
-
-        # 2. Target distribution Q (row-normalised T)
-        T_clamped = T.clamp(min=self.eps)
-        Q = T_clamped / (T_clamped.sum(dim=-1, keepdim=True) + self.eps)  # (B, B)
-
-        # 3. Per-pair KL: KL(Q||P) = Σ_j Q[j] * (log Q[j] - log P[j])
-        #    F.kl_div(log_P, Q, reduction='none') = Q * (log Q - log P)
-        kl_per_pair = F.kl_div(log_P, Q, reduction='none')  # (B, B)
-
-        # 5. Asymmetric popularity weights: W_ij = w_j * (1 - w_i)
+        # 1. Popularity weights for asymmetric mask
         w = self._compute_pop_weights(item_popularities, device)  # (B,)
-        W = w.unsqueeze(0) * (1.0 - w.unsqueeze(1))  # (B, B)
 
-        # 6. Weighted sum
-        weighted_kl = W * kl_per_pair  # (B, B)
-        loss = weighted_kl.sum() / B
+        # 2. Asymmetric mask: W_mask[i,j] = (1-w_i) * w_j
+        #    cold anchor (w_i≈0) aligns to hot key (w_j≈1) → weight≈1
+        #    hot anchor (w_i≈1) aligns to cold key (w_j≈0) → weight≈0
+        W_mask = (1.0 - w.unsqueeze(1)) * w.unsqueeze(0)  # (B, B)
+
+        # 3. Modulate the TARGET T (not the KL elements!)
+        #    Diagonal (self-alignment) always = 1.0 — the most reliable signal.
+        #    Off-diagonal targets are masked by W_mask to implement asymmetric
+        #    denoising while PRESERVING the softmax repulsion force.
+        I = torch.eye(B, device=device)
+        T_asym = T * (1.0 - I) * W_mask + I  # (B, B)
+
+        # 4. Bidirectional KL to preserve uniform space (prevents collapse)
+        sim = (h_t @ h_c.T) / self.temperature
+
+        # Text → Collab
+        Q_t2c = T_asym / (T_asym.sum(dim=-1, keepdim=True) + self.eps)
+        log_P_t2c = F.log_softmax(sim, dim=-1)
+        loss_t2c = F.kl_div(log_P_t2c, Q_t2c, reduction='batchmean')
+
+        # Collab → Text
+        Q_c2t = T_asym.T / (T_asym.T.sum(dim=-1, keepdim=True) + self.eps)
+        log_P_c2t = F.log_softmax(sim.T, dim=-1)
+        loss_c2t = F.kl_div(log_P_c2t, Q_c2t, reduction='batchmean')
+
+        loss = (loss_t2c + loss_c2t) / 2.0
 
         # ── Diagnostics ──
         with torch.no_grad():
-            # Mean KL per anchor (unweighted)
-            kl_per_anchor = kl_per_pair.sum(dim=-1)  # (B,)
-            mean_kl = kl_per_anchor.mean().item()
+            mean_kl = loss.item()
 
-            # Asymmetry ratio: avg W for cold→hot vs hot→cold
             cold_mask = w <= w.median()
             hot_mask = w > w.median()
             if cold_mask.any() and hot_mask.any():
-                w_cold_to_hot = W[cold_mask][:, hot_mask].mean().item()
-                w_hot_to_cold = W[hot_mask][:, cold_mask].mean().item()
+                w_cold_to_hot = W_mask[cold_mask][:, hot_mask].mean().item()
+                w_hot_to_cold = W_mask[hot_mask][:, cold_mask].mean().item()
             else:
-                w_cold_to_hot = 0.0
-                w_hot_to_cold = 0.0
+                w_cold_to_hot, w_hot_to_cold = 0.0, 0.0
 
-            # Effective target entropy (how spread is Q?)
-            q_entropy = -(Q * torch.log(Q + self.eps)).sum(dim=-1).mean().item()
-
-            # Top-1 agreement: does argmax of P match argmax of Q?
-            top1_match = (P.argmax(dim=-1) == Q.argmax(dim=-1)).float().mean().item()
+            q_entropy = -(Q_t2c * torch.log(Q_t2c + self.eps)).sum(dim=-1).mean().item()
+            top1_match = (log_P_t2c.argmax(dim=-1) == Q_t2c.argmax(dim=-1)).float().mean().item()
 
         loss_dict = {
             'pa_scl': loss.item(),
