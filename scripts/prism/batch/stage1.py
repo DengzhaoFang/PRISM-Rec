@@ -88,7 +88,7 @@ BASE_TRAIN_ARGS = [
     "--commit_weight", "0.25",
     "--use_ema", "--ema_decay", "0.99", "--quantize_mode", "rotation",
     "--use_scheduler", "--scheduler_type", "warmup_cosine", "--warmup_ratio", "0.1",
-    "--early_stop_patience", "80", "--early_stop_min_delta", "1e-5",
+    "--early_stop_patience", "50", "--early_stop_min_delta", "1e-5",
     "--early_stop_cooldown", "3", "--early_stop_warmup_epochs", "5",
     "--perplexity_collapse_ratio", "0.35", "--perplexity_collapse_patience", "3",
     "--kmeans_init_samples", "8192",
@@ -96,36 +96,70 @@ BASE_TRAIN_ARGS = [
     "--ide", "on", "--ide_dim", "128",
 ]
 
+# EXPERIMENT_GROUPS = [
+#     ("PA-SCL: Stage1 Ablation Study", [
+#         # PA-SCL replaces CMA (single decoder)
+#         ("pa_scl",
+#          ["--use_pa_scl"]),
+
+#         # PA-SCL + Dual-Head Decoder
+#         ("pa_scl_dual_head",
+#          ["--use_pa_scl",
+#           "--use_dual_head"]),
+
+#         # PA-SCL + Dual-Head (stronger graph prior)
+#         ("pa_scl_dual_head_higraph",
+#          ["--use_pa_scl",
+#           "--use_dual_head",
+#           "--graph_scale_beta", "0.10"]),
+
+#         # PA-SCL + Dual-Head (sharper text)
+#         ("pa_scl_dual_head_sharptext",
+#          ["--use_pa_scl",
+#           "--use_dual_head",
+#           "--text_sharpen_gamma", "5.0"]),
+#     ]),
+# ]
+
 EXPERIMENT_GROUPS = [
-    ("PA-SCL: Stage1 Ablation Study", [
-        # A: CMA baseline (single decoder)
-        # ("cma_baseline",
-        #  ["--lambda_cma", "0.1"]),
+    ("PA-SCL: Core Ablation Study (4 Runs)", [
+        
+        # [实验 1] 黄金基准 (Ours Baseline)
+        # 默认参数: K=5, γ=3.0, β=0.05 (单头)
+        # 目的: 作为全场性能的 Anchor (锚点)，跑出我们能达到的最高 NDCG。
+        ("pa_scl_baseline",
+         ["--use_pa_scl", 
+          "--pa_scl_topk", "5"]),
 
-        # B: PA-SCL replaces CMA (single decoder)
-        ("pa_scl",
-         ["--use_pa_scl"]),
-
-        # C: PA-SCL + Dual-Head Decoder
-        ("pa_scl_dual_head",
-         ["--use_pa_scl",
-          "--use_dual_head"]),
-
-        # D: CMA + Dual-Head Decoder (no PA-SCL)
-        # ("cma_dual_head",
-        #  ["--lambda_cma", "0.1",
+        #  # PA-SCL + Dual-Head Decoder  ❌️
+        # ("pa_scl_dual_head",
+        #  ["--use_pa_scl",
         #   "--use_dual_head"]),
 
-        # E: PA-SCL + Dual-Head (stronger graph prior)
-        ("pa_scl_dual_head_higraph",
-         ["--use_pa_scl",
-          "--use_dual_head",
+        # [实验 2] 目标稀疏度退化 (Hard Target Ablation)
+        # 目的: 回答审稿人“为什么要用软目标和 K=5？”。
+        # K=1 意味着完全退化成了传统的硬对比学习 (Hard InfoNCE)，它会无情推开所有其他物品。
+        # 预期: NDCG 会下降，证明保留多对多的局部流形 (Local Manifold) 对推荐系统的必要性。
+        ("pa_scl_hard_k1",
+         ["--use_pa_scl", 
+          "--pa_scl_topk", "1"]),
+
+        # [实验 3] 模态博弈：压制图拓扑 (Text Dominant)
+        # 将图门槛 β 提高到 0.10，导致图特征很难在 Top-K 中胜出。
+        # 目的: 证明“引入图先验”的价值。
+        # 预期: 模型会丧失对“鼠标垫与显卡”这种互补品的捕获能力，导致基于共现的推荐命中率下降。
+        ("pa_scl_text_dominant",
+         ["--use_pa_scl", 
+          "--pa_scl_topk", "5", 
           "--graph_scale_beta", "0.10"]),
 
-        # F: PA-SCL + Dual-Head (sharper text)
-        ("pa_scl_dual_head_sharptext",
-         ["--use_pa_scl",
-          "--use_dual_head",
+        # [实验 4] 模态博弈：压制文本语义 (Graph Dominant)
+        # 将文本锐化 γ 提高到 5.0，导致文本相似度暴跌，图特征在 Top-K 中占据统治地位。
+        # 目的: 证明“保留文本语义”对长尾物品的兜底作用。
+        # 预期: 热门商品可能表现不变，但毫无点击的长尾商品因为失去了语义锚点，准确率会暴跌。
+        ("pa_scl_graph_dominant",
+         ["--use_pa_scl", 
+          "--pa_scl_topk", "5", 
           "--text_sharpen_gamma", "5.0"]),
     ]),
 ]
