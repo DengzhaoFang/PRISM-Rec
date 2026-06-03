@@ -129,6 +129,7 @@ class PRISMTrainer:
             self.pa_scl_prior = TopologySemanticPrior(
                 raw_text_emb=raw_text,
                 item_ids=item_df['ItemID'].values,
+                device=self.device,
                 cooc_counts=cooc_counts,
                 text_sharpen_gamma=self.config.get('text_sharpen_gamma', 3.0),
                 graph_scale_beta=self.config.get('graph_scale_beta', 0.05),
@@ -138,6 +139,12 @@ class PRISMTrainer:
             for _, row in train_df.iterrows():
                 for iid in list(row['history'])+[row['target']]:
                     self.item_pop[int(iid)] += 1
+
+            # Pre-build GPU popularity tensor for O(1) indexed lookup
+            max_pop_id = max(self.item_pop.keys()) if self.item_pop else 0
+            self.item_pop_tensor = torch.zeros(max_pop_id + 1, dtype=torch.float32, device=self.device)
+            for iid, count in self.item_pop.items():
+                self.item_pop_tensor[iid] = count
 
             self.logger.info(f"  PA-SCL prior: {len(item_df)} items, "
                              f"γ={self.config.get('text_sharpen_gamma',3.0)}, "
@@ -280,10 +287,7 @@ class PRISMTrainer:
             use_dual_head = self.config.get('use_dual_head', False)
             if use_dual_head:
                 from dual_head_decoder import DualHeadUPRLoss
-                pop = torch.tensor(
-                    [self.dataset.item_id_to_idx.get(int(iid), 0)
-                     for iid in batch['item_id'].numpy()],
-                    device=self.device, dtype=torch.float32)
+                pop = self.item_pop_tensor[batch['item_id'].to(self.device)]
                 upr_loss, upr_dict = self._dual_upr_loss(
                     outputs['h_t_hat'], outputs['h_c_hat'], h_t, h_c, pop)
                 loss_upr = upr_loss
@@ -310,10 +314,9 @@ class PRISMTrainer:
 
             # PA-SCL: replaces CMA with topology-aware soft contrastive loss
             if self.pa_scl_loss is not None:
-                T = self.pa_scl_prior.compute_T(batch['item_id'].numpy()).to(self.device)
-                pop = torch.tensor(
-                    [self.item_pop.get(int(iid), 0) for iid in batch['item_id'].numpy()],
-                    device=self.device, dtype=torch.float32)
+                batch_ids_gpu = batch['item_id'].to(self.device)
+                T = self.pa_scl_prior.compute_T(batch_ids_gpu)
+                pop = self.item_pop_tensor[batch_ids_gpu]
                 pa_loss, pa_dict = self.pa_scl_loss(h_t, h_c, T, pop)
                 lambda_pa = self.config.get('lambda_pa_scl', 0.1)
                 total_loss = total_loss + lambda_pa * pa_loss
