@@ -333,7 +333,7 @@ BASE_REC_ARGS = [
     "--model_type", "t5-tiny-2",
     "--log_clean",
     "--use_multimodal_fusion",
-    "--fusion_gate_type", "dense",
+    "--fusion_gate_type", "learned",
     "--use_purified_predictor",
     "--purified_predictor_weight", "0.1",
     "--use_item_layer_emb", "--use_temporal_decay",

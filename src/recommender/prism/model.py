@@ -801,11 +801,14 @@ class TIGER(nn.Module):
                 top_k = getattr(training_config, 'moe_top_k', 2)
                 use_load_balancing = getattr(training_config, 'moe_use_load_balancing', True)
                 load_balance_weight = getattr(training_config, 'moe_load_balance_weight', 0.01)
+                use_improved_projection = getattr(training_config, 'moe_use_improved_projection', False)
+                codebook_dim = getattr(training_config, 'moe_codebook_dim', 32)
 
                 router_type = "sparse" if fusion_gate_type == "moe" else "dense"
                 self.fusion_module = MoEFusion(
                     d_model=model_config.d_model,
-                    purified_dim=128,
+                    content_dim=768,
+                    collab_dim=64,
                     num_experts=num_experts,
                     expert_hidden_dim=expert_hidden_dim,
                     top_k=top_k,
@@ -813,11 +816,14 @@ class TIGER(nn.Module):
                     load_balance_weight=load_balance_weight,
                     dropout=model_config.dropout_rate,
                     use_residual=True,
+                    use_improved_projection=use_improved_projection,
+                    codebook_dim=codebook_dim,
                     router_type=router_type,
                 )
                 logger.info(
                     f"MoE fusion enabled [{router_type}]: {num_experts} experts, Top-{top_k}, "
-                    f"hidden_dim={expert_hidden_dim}, load_balancing={use_load_balancing}"
+                    f"hidden_dim={expert_hidden_dim}, load_balancing={use_load_balancing}, "
+                    f"improved_projection={use_improved_projection}"
                 )
             else:
                 # Use traditional fusion (learned, attention, fixed)
@@ -1054,7 +1060,7 @@ class TIGER(nn.Module):
             
             # Broadcast codebook vectors to token-level if using improved projection
             codebook_emb_broadcasted = None
-            if isinstance(self.fusion_module, MoEFusion) and getattr(self.fusion_module, 'use_improved_projection', False):
+            if isinstance(self.fusion_module, MoEFusion) and self.fusion_module.use_improved_projection:
                 if history_codebook_vecs is not None:
                     # history_codebook_vecs: (B, max_items, n_layers, latent_dim)
                     # We need to flatten it to (B, max_items * n_layers, latent_dim)
@@ -1248,7 +1254,7 @@ class TIGER(nn.Module):
             
             # Broadcast codebook vectors to token-level if using improved projection
             codebook_emb_broadcasted = None
-            if isinstance(self.fusion_module, MoEFusion) and getattr(self.fusion_module, 'use_improved_projection', False):
+            if isinstance(self.fusion_module, MoEFusion) and self.fusion_module.use_improved_projection:
                 if history_codebook_vecs is not None:
                     # history_codebook_vecs: (B, max_items, n_layers, latent_dim)
                     batch_size, max_items, n_layers, latent_dim = history_codebook_vecs.shape
