@@ -82,6 +82,16 @@ class TopologySemanticPrior:
         self.text_norm = torch.nn.functional.normalize(
             self.raw_text_emb, p=2, dim=-1)
 
+        # Global text percentile precomputation (one-time O(N²) → per-batch O(1))
+        sample_n = min(5000, len(self.text_norm))
+        sample_idx = torch.randperm(len(self.text_norm))[:sample_n]
+        S_sample = self.text_norm[sample_idx] @ self.text_norm[sample_idx].T
+        off = S_sample[~torch.eye(sample_n, dtype=torch.bool)]
+        self._text_lo = torch.quantile(off, self.text_p_lo / 100.0).item()
+        self._text_hi = torch.quantile(off, self.text_p_hi / 100.0).item()
+        self._text_denom = max(self._text_hi - self._text_lo, 1e-8)
+        del S_sample, off, sample_idx
+
     # ── Public API ──────────────────────────────────────────────────
 
     @torch.no_grad()
@@ -122,15 +132,7 @@ class TopologySemanticPrior:
     @torch.no_grad()
     def _compute_text_calibrated(self, indices: List[int]) -> torch.Tensor:
         S = self._compute_S_text_raw(indices)
-        B = S.size(0)
-        mask = ~torch.eye(B, dtype=torch.bool, device=S.device)
-        off_diag = S[mask]
-        lo = torch.quantile(off_diag, self.text_p_lo / 100.0)
-        hi = torch.quantile(off_diag, self.text_p_hi / 100.0)
-        denom = hi - lo
-        if denom < 1e-8:
-            denom = 1.0
-        S_norm = (S - lo) / denom
+        S_norm = (S - self._text_lo) / self._text_denom
         S_norm = S_norm.clamp(0.0, 1.0)
         if self.text_gamma != 1.0:
             S_norm = S_norm ** self.text_gamma

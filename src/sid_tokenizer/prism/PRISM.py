@@ -23,13 +23,15 @@ from ide import IDEEqualizer
 
 class MultiModalEncoder(nn.Module):
     """
-    Multi-modal encoder with IDE.
+    Multi-modal encoder with IDE + Gated Shared/Diff Decomposition.
 
     Pipeline:
-    1. IDE: Project text (768D) and collab (64D) to shared dimension d=128
-       with LayerNorm for gradient equalization.
-    2. Fusion: z_clean = [h_c || h_t]  (256D clean feature)
-    3. Encode: MLP projects z_clean -> z_latent (latent_dim)
+    1. IDE: Project text (768D) and collab (64D) to shared dimension d=128.
+    2. Gated Decomposition: z_cons = LN((h_t+h_c)/2), z_diff = LN(h_t-h_c),
+       g = σ(MLP([h_t, h_c])).  The gate suppresses noisy modality-specific
+       dimensions while preserving informative differences.
+    3. Fusion: z_clean = [z_cons || g⊙z_diff]  (256D clean feature)
+    4. Encode: MLP projects z_clean -> z_latent (latent_dim)
     """
 
     def __init__(
@@ -49,6 +51,8 @@ class MultiModalEncoder(nn.Module):
         self.use_ide = use_ide
         self.ide_dim = ide_dim
 
+        d = ide_dim if use_ide else min(content_dim, collab_dim)
+
         if use_ide:
             self.ide = IDEEqualizer(
                 content_dim=content_dim,
@@ -59,6 +63,16 @@ class MultiModalEncoder(nn.Module):
         else:
             self.ide = None
             fusion_dim = content_dim + collab_dim
+
+        # Gated Shared/Diff decomposition: extract consensus, gate the residual
+        self.ln_cons = nn.LayerNorm(d)
+        self.ln_diff = nn.LayerNorm(d)
+        self.gating_mlp = nn.Sequential(
+            nn.Linear(d * 2, 32),
+            nn.ReLU(),
+            nn.Linear(32, d),
+            nn.Sigmoid(),
+        )
 
         if hidden_dims is None:
             hidden_dims = [512, 256, 128]
@@ -86,7 +100,12 @@ class MultiModalEncoder(nn.Module):
         else:
             h_t, h_c = content_emb, collab_emb
 
-        z_clean = torch.cat([h_c, h_t], dim=-1)
+        # Gated Shared/Diff: separate consensus from modality-specific detail
+        z_cons = self.ln_cons((h_t + h_c) / 2.0)
+        z_diff = self.ln_diff(h_t - h_c)
+        g = self.gating_mlp(torch.cat([h_t, h_c], dim=-1))
+        z_clean = torch.cat([z_cons, g * z_diff], dim=-1)
+
         z = self.encoder(z_clean)
 
         return {
@@ -145,16 +164,18 @@ class UnifiedDecoder(nn.Module):
 
 class PRISM(nn.Module):
     """
-    PRISM with IDE + UPR + optional Reliability Gate + optional SACO.
+    PRISM with IDE + UPR + optional Dual-Head Decoder.
 
     Architecture:
     1. IDE: projects text (768D) and collab (64D) -> shared 128D
     2. Fusion: z_clean = [h_c || h_t]  (256D)
     3. Encoder: z_clean -> MLP -> z_latent (latent_dim)
     4. RQ-VAE: hierarchical quantization of z_latent -> z_q
-    5. UnifiedDecoder: z_q -> z_dec (256D, targets z_clean.detach())
+    5. Decoder: UnifiedDecoder → z_dec (256D), OR
+               DualHeadDecoder → h_t_hat, h_c_hat (128D each)
 
-    Loss: L_UPR = MSE(z_dec, z_clean.detach())
+    Loss (single): L_UPR = MSE(z_dec, z_clean.detach())
+    Loss (dual):   L_UPR = MSE(h_t_hat, sg(h_t)) + w_c * MSE(h_c_hat, sg(h_c))
     """
 
     def __init__(
@@ -173,6 +194,7 @@ class PRISM(nn.Module):
         ema_decay: float = 0.99,
         beta: float = 0.25,
         quantize_mode: QuantizeMode = QuantizeMode.ROTATION,
+        use_dual_head: bool = False,
     ):
         super().__init__()
 
@@ -180,6 +202,7 @@ class PRISM(nn.Module):
         self.collab_dim = collab_dim
         self.latent_dim = latent_dim
         self.n_layers = n_layers
+        self.use_dual_head = use_dual_head
 
         if n_embed_per_layer is None:
             self.n_embed_per_layer = [n_embed] * n_layers
@@ -190,7 +213,6 @@ class PRISM(nn.Module):
 
         self.n_embed = n_embed
         self.beta = beta
-        output_dim = ide_dim * 2 if use_ide else content_dim + collab_dim
 
         self.encoder = MultiModalEncoder(
             content_dim=content_dim,
@@ -213,11 +235,20 @@ class PRISM(nn.Module):
             for i in range(n_layers)
         ])
 
-        self.decoder = UnifiedDecoder(
-            latent_dim=latent_dim,
-            output_dim=output_dim,
-            hidden_dims=decoder_hidden_dims,
-        )
+        if use_dual_head:
+            from dual_head_decoder import DualHeadDecoder
+            self.decoder = DualHeadDecoder(
+                latent_dim=latent_dim,
+                output_dim=ide_dim if use_ide else content_dim,
+                hidden_dims=decoder_hidden_dims,
+            )
+        else:
+            output_dim = ide_dim * 2 if use_ide else content_dim + collab_dim
+            self.decoder = UnifiedDecoder(
+                latent_dim=latent_dim,
+                output_dim=output_dim,
+                hidden_dims=decoder_hidden_dims,
+            )
 
     def encode(self, content_emb, collab_emb):
         return self.encoder(content_emb, collab_emb)
@@ -269,17 +300,29 @@ class PRISM(nn.Module):
         z_q, quantized_codes, encoding_indices, codebook_loss, perplexities = \
             self.quantize(z, temperature)
 
-        z_dec = self.decode(z_q)
+        dec_outputs = self.decode(z_q)
 
-        output_dict = {
-            'z_dec': z_dec,
-            'z_clean': z_clean,
-            'z': z,
-            'h_t': enc_outputs['h_t'],
-            'h_c': enc_outputs['h_c'],
-            'codebook_loss': codebook_loss,
-            'perplexities': perplexities,
-        }
+        if self.use_dual_head:
+            output_dict = {
+                'h_t_hat': dec_outputs['h_t_hat'],
+                'h_c_hat': dec_outputs['h_c_hat'],
+                'z_clean': z_clean,
+                'z': z,
+                'h_t': enc_outputs['h_t'],
+                'h_c': enc_outputs['h_c'],
+                'codebook_loss': codebook_loss,
+                'perplexities': perplexities,
+            }
+        else:
+            output_dict = {
+                'z_dec': dec_outputs,
+                'z_clean': z_clean,
+                'z': z,
+                'h_t': enc_outputs['h_t'],
+                'h_c': enc_outputs['h_c'],
+                'codebook_loss': codebook_loss,
+                'perplexities': perplexities,
+            }
 
         if return_codes:
             output_dict['z_q'] = z_q
@@ -335,4 +378,5 @@ def create_prism_from_config(config: Dict) -> PRISM:
         ema_decay=config.get('ema_decay', 0.99),
         beta=config.get('beta', 0.25),
         quantize_mode=QuantizeMode(config.get('quantize_mode', 'rotation')),
+        use_dual_head=config.get('use_dual_head', False),
     )

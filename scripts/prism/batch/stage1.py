@@ -97,9 +97,36 @@ BASE_TRAIN_ARGS = [
 ]
 
 EXPERIMENT_GROUPS = [
-    ("CMA Baseline", [
-        ("cma_only",
-         ["--lambda_cma", "0.1"]),
+    ("PA-SCL: Stage1 Ablation Study", [
+        # A: CMA baseline (single decoder)
+        # ("cma_baseline",
+        #  ["--lambda_cma", "0.1"]),
+
+        # B: PA-SCL replaces CMA (single decoder)
+        ("pa_scl",
+         ["--use_pa_scl"]),
+
+        # C: PA-SCL + Dual-Head Decoder
+        ("pa_scl_dual_head",
+         ["--use_pa_scl",
+          "--use_dual_head"]),
+
+        # D: CMA + Dual-Head Decoder (no PA-SCL)
+        # ("cma_dual_head",
+        #  ["--lambda_cma", "0.1",
+        #   "--use_dual_head"]),
+
+        # E: PA-SCL + Dual-Head (stronger graph prior)
+        ("pa_scl_dual_head_higraph",
+         ["--use_pa_scl",
+          "--use_dual_head",
+          "--graph_scale_beta", "0.10"]),
+
+        # F: PA-SCL + Dual-Head (sharper text)
+        ("pa_scl_dual_head_sharptext",
+         ["--use_pa_scl",
+          "--use_dual_head",
+          "--text_sharpen_gamma", "5.0"]),
     ]),
 ]
 

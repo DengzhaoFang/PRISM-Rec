@@ -16,7 +16,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 # ── Editable config ──────────────────────────────────────────────────────
-STAGE1_DIR="${STAGE1_DIR:-scripts/output/prism_tokenizer/beauty/hparam_stage1}"
+STAGE1_DIR="${STAGE1_DIR:-scripts/output/prism_tokenizer/beauty/hparam_stage1_PA_SCL}"
 STAGE1_EXPERIMENTS="${STAGE1_EXPERIMENTS:-}"
 STAGE2_OUTPUT="${STAGE2_OUTPUT:-hparam_stage2}"
 FAST_DEV_CONFIG="${FAST_DEV_CONFIG:-}"
