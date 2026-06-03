@@ -148,10 +148,9 @@ class LongTailEvaluator:
         device: str = 'cuda',
         beam_size: int = 30,
         topk_list: List[int] = None,
-        # Multimodal support for Prism
-        content_embeddings: Optional[Dict[int, np.ndarray]] = None,
-        collab_embeddings: Optional[Dict[int, np.ndarray]] = None,
-        codebook_vectors: Optional[Dict[int, np.ndarray]] = None,
+        # Purified multimodal support for Prism
+        purified_content: Optional[Dict[int, np.ndarray]] = None,
+        purified_collab: Optional[Dict[int, np.ndarray]] = None,
         use_multimodal: bool = False,
         num_code_layers: int = 3,
         # Trie-constrained decoding
@@ -166,10 +165,9 @@ class LongTailEvaluator:
         self.beam_size = beam_size
         self.topk_list = topk_list or [5, 10, 20]
         
-        # Multimodal embeddings
-        self.content_embeddings = content_embeddings or {}
-        self.collab_embeddings = collab_embeddings or {}
-        self.codebook_vectors = codebook_vectors or {}
+        # Purified multimodal embeddings
+        self.purified_content = purified_content or {}
+        self.purified_collab = purified_collab or {}
         self.use_multimodal = use_multimodal
         self.num_code_layers = num_code_layers
         
@@ -192,49 +190,39 @@ class LongTailEvaluator:
             logger.info("Trie-constrained decoding enabled")
         
         # Determine embedding dimensions
-        if self.content_embeddings:
-            self.content_dim = next(iter(self.content_embeddings.values())).shape[0]
+        if self.purified_content:
+            self.content_dim = next(iter(self.purified_content.values())).shape[0]
         else:
-            self.content_dim = 768
-        
-        if self.collab_embeddings:
-            self.collab_dim = next(iter(self.collab_embeddings.values())).shape[0]
+            self.content_dim = 128
+
+        if self.purified_collab:
+            self.collab_dim = next(iter(self.purified_collab.values())).shape[0]
         else:
-            self.collab_dim = 64
+            self.collab_dim = 128
         
         self.model.to(self.device)
         self.model.eval()
     
     def _get_multimodal_inputs(self, history_padded: List[int], max_len: int):
-        """Get multimodal embeddings for history items."""
+        """Get Stage 1 purified embeddings for history items."""
         content_embs = []
         collab_embs = []
-        codebook_vecs = []
-        
+
         for item_id in history_padded:
-            # Content embedding
-            if item_id in self.content_embeddings:
-                content_embs.append(self.content_embeddings[item_id])
+            if item_id in self.purified_content:
+                content_embs.append(self.purified_content[item_id])
             else:
                 content_embs.append(np.zeros(self.content_dim, dtype=np.float32))
-            
-            # Collab embedding
-            if item_id in self.collab_embeddings:
-                collab_embs.append(self.collab_embeddings[item_id])
+
+            if item_id in self.purified_collab:
+                collab_embs.append(self.purified_collab[item_id])
             else:
                 collab_embs.append(np.zeros(self.collab_dim, dtype=np.float32))
-            
-            # Codebook vectors
-            if item_id in self.codebook_vectors:
-                codebook_vecs.append(self.codebook_vectors[item_id])
-            else:
-                codebook_vecs.append(np.zeros((self.num_code_layers, 32), dtype=np.float32))
-        
+
         content_tensor = torch.tensor(np.array(content_embs), dtype=torch.float32, device=self.device).unsqueeze(0)
         collab_tensor = torch.tensor(np.array(collab_embs), dtype=torch.float32, device=self.device).unsqueeze(0)
-        codebook_tensor = torch.tensor(np.array(codebook_vecs), dtype=torch.float32, device=self.device).unsqueeze(0)
-        
-        return content_tensor, collab_tensor, codebook_tensor
+
+        return content_tensor, collab_tensor
     
     def evaluate(self, test_data_path: str, max_len: int = 20) -> Dict:
         """Evaluate model on test data with popularity grouping."""
@@ -271,8 +259,7 @@ class LongTailEvaluator:
                 max_gen_length = self.semantic_mapper.num_layers + 1
                 
                 if self.use_multimodal:
-                    # Get multimodal embeddings
-                    content_embs, collab_embs, codebook_vecs = self._get_multimodal_inputs(
+                    purified_content, purified_collab = self._get_multimodal_inputs(
                         history_padded, max_len
                     )
                     preds = self.model.generate(
@@ -280,9 +267,8 @@ class LongTailEvaluator:
                         attention_mask=attention_mask,
                         num_beams=self.beam_size,
                         max_length=max_gen_length,
-                        content_embs=content_embs,
-                        collab_embs=collab_embs,
-                        history_codebook_vecs=codebook_vecs,
+                        purified_content=purified_content,
+                        purified_collab=purified_collab,
                         logits_processor=self.trie_logits_processor
                     )
                 else:
@@ -759,9 +745,8 @@ def main():
     )
     
     # Load multimodal embeddings for Prism
-    content_embeddings = None
-    collab_embeddings = None
-    codebook_vectors = None
+    purified_content = None
+    purified_collab = None
     use_multimodal = False
     use_trie_constraints = False
     
@@ -778,32 +763,16 @@ def main():
     if args.model_type == 'prism':
         if training_config and hasattr(training_config, 'use_multimodal_fusion') and training_config.use_multimodal_fusion:
             use_multimodal = True
-            logger.info("Loading multimodal embeddings for Prism...")
+            logger.info("Loading purified Stage 1 features for Prism...")
             
-            # Import loading functions from dataset.py
             from src.recommender.prism.dataset import (
-                load_content_embeddings,
-                load_collab_embeddings,
-                load_codebook_mappings
+                load_purified_embeddings,
             )
-            
-            # Load content embeddings from item_emb.parquet
-            data_dir = paths['sequence_data_path']
-            content_embeddings = load_content_embeddings(data_dir)
-            logger.info(f"Loaded content embeddings for {len(content_embeddings)} items")
-            
-            # Load collab embeddings from lightgcn directory
-            collab_path = Path(data_dir) / 'lightgcn' / 'item_embeddings_collab.npy'
-            if collab_path.exists():
-                collab_embeddings = load_collab_embeddings(str(collab_path))
-                logger.info(f"Loaded collab embeddings for {len(collab_embeddings)} items")
-            else:
-                logger.warning(f"Collab embeddings not found at {collab_path}")
-            
-            # Load codebook vectors from tokenizer output
-            tokenizer_dir = Path(config['data'].semantic_mapping_path).parent
-            codebook_vectors, _ = load_codebook_mappings(str(tokenizer_dir))
-            logger.info(f"Loaded codebook vectors for {len(codebook_vectors)} items")
+
+            purified_content, purified_collab, _ = load_purified_embeddings(
+                config['data'].purified_content_path,
+                config['data'].purified_collab_path,
+            )
     
     # Create evaluator with multimodal and Trie support
     evaluator = LongTailEvaluator(
@@ -812,9 +781,8 @@ def main():
         popularity_grouper=popularity_grouper,
         device=args.device,
         beam_size=args.beam_size,
-        content_embeddings=content_embeddings,
-        collab_embeddings=collab_embeddings,
-        codebook_vectors=codebook_vectors,
+        purified_content=purified_content,
+        purified_collab=purified_collab,
         use_multimodal=use_multimodal,
         num_code_layers=config['model'].num_code_layers,
         use_trie_constraints=use_trie_constraints,

@@ -49,49 +49,34 @@ def collate_fn(batch: List[Dict], pad_token_id: int = 0, use_dynamic_batching: b
         'attention_mask': attention_mask
     }
     
-    # Add multi-modal data if present in batch
-    if 'history_codebook_vecs' in batch[0]:
-        result['history_codebook_vecs'] = torch.stack([
-            torch.from_numpy(item['history_codebook_vecs']) for item in batch
+    # Add purified DSI features if present
+    if 'history_purified_content' in batch[0]:
+        result['history_purified_content'] = torch.stack([
+            torch.from_numpy(item['history_purified_content']) for item in batch
         ])
-    
-    if 'target_codebook_vecs' in batch[0]:
-        result['target_codebook_vecs'] = torch.stack([
-            torch.from_numpy(item['target_codebook_vecs']) for item in batch
+
+    if 'history_purified_collab' in batch[0]:
+        result['history_purified_collab'] = torch.stack([
+            torch.from_numpy(item['history_purified_collab']) for item in batch
         ])
-    
-    if 'history_content_embs' in batch[0]:
-        result['history_content_embs'] = torch.stack([
-            torch.from_numpy(item['history_content_embs']) for item in batch
+
+    if 'target_z_clean' in batch[0]:
+        result['target_z_clean'] = torch.stack([
+            torch.from_numpy(item['target_z_clean']) for item in batch
         ])
-    
-    if 'target_content_emb' in batch[0]:
-        result['target_content_emb'] = torch.stack([
-            torch.from_numpy(item['target_content_emb']) for item in batch
-        ])
-    
-    if 'history_collab_embs' in batch[0]:
-        result['history_collab_embs'] = torch.stack([
-            torch.from_numpy(item['history_collab_embs']) for item in batch
-        ])
-    
-    if 'target_collab_emb' in batch[0]:
-        result['target_collab_emb'] = torch.stack([
-            torch.from_numpy(item['target_collab_emb']) for item in batch
-        ])
-    
-    if 'history_tag_ids' in batch[0]:
-        result['history_tag_ids'] = [item['history_tag_ids'] for item in batch]
-    
-    if 'target_tag_ids' in batch[0]:
-        result['target_tag_ids'] = [item['target_tag_ids'] for item in batch]
     
     if 'history_item_ids' in batch[0]:
         result['history_item_ids'] = [item['history_item_ids'] for item in batch]
     
     if 'target_item_id' in batch[0]:
         result['target_item_id'] = [item['target_item_id'] for item in batch]
-    
+
+    # Teacher prototypes for TCAF
+    if 'target_teacher' in batch[0]:
+        result['target_teacher'] = torch.stack([
+            torch.from_numpy(item['target_teacher']) for item in batch
+        ])
+
     return result
 
 
@@ -126,13 +111,16 @@ class GenRecDataLoader(DataLoader):
         # Create collate function with pad_token_id and dynamic batching
         def _collate_fn(batch):
             return collate_fn(batch, pad_token_id=pad_token_id, use_dynamic_batching=use_dynamic_batching)
-        
+
         super().__init__(
             dataset,
             batch_size=batch_size,
             shuffle=shuffle,
             num_workers=num_workers,
             collate_fn=_collate_fn,
+            pin_memory=True,
+            persistent_workers=num_workers > 0,
+            prefetch_factor=2 if num_workers > 0 else None,
             **kwargs
         )
 

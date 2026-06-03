@@ -89,12 +89,6 @@ def count_auxiliary_task_parameters(model: nn.Module, model_name: str) -> int:
             auxiliary_params += codebook_params
             logger.info(f"  Codebook predictor params (training only): {codebook_params:,}")
         
-        # Count tag_predictor parameters
-        if hasattr(model, 'tag_predictor') and model.tag_predictor is not None:
-            tag_params = sum(p.numel() for p in model.tag_predictor.parameters())
-            auxiliary_params += tag_params
-            logger.info(f"  Tag predictor params (training only): {tag_params:,}")
-    
     return auxiliary_params
 
 
@@ -302,9 +296,8 @@ def benchmark_inference(
     beam_size: int = 20,
     warmup_runs: int = 10,
     config: dict = None,
-    content_embeddings: Dict[int, np.ndarray] = None,
-    collab_embeddings: Dict[int, np.ndarray] = None,
-    codebook_vectors: Dict[int, np.ndarray] = None
+    purified_content: Dict[int, np.ndarray] = None,
+    purified_collab: Dict[int, np.ndarray] = None,
 ) -> Dict[str, float]:
     """Benchmark inference speed.
     """
@@ -318,20 +311,15 @@ def benchmark_inference(
             use_multimodal = True
             logger.info("  Using multimodal inputs for Prism")
     
-    # Determine dimensions for multimodal
-    content_dim = 768
-    collab_dim = 64
+    # Determine dimensions for purified features
+    content_dim = 128
+    collab_dim = 128
     num_code_layers = semantic_mapper.num_layers if hasattr(semantic_mapper, 'num_layers') else 3
-    latent_dim = 32
-    
-    if content_embeddings:
-        content_dim = next(iter(content_embeddings.values())).shape[0]
-    if collab_embeddings:
-        collab_dim = next(iter(collab_embeddings.values())).shape[0]
-    if codebook_vectors:
-        sample_cb = next(iter(codebook_vectors.values()))
-        num_code_layers = sample_cb.shape[0]
-        latent_dim = sample_cb.shape[1]
+
+    if purified_content:
+        content_dim = next(iter(purified_content.values())).shape[0]
+    if purified_collab:
+        collab_dim = next(iter(purified_collab.values())).shape[0]
     
     # Prepare inputs based on model type
     all_inputs = []
@@ -365,28 +353,21 @@ def benchmark_inference(
                 history_padded = sample['history']
                 content_embs = []
                 collab_embs = []
-                codebook_vecs = []
                 
                 for item_id in history_padded:
-                    if content_embeddings and item_id in content_embeddings:
-                        content_embs.append(content_embeddings[item_id])
+                    if purified_content and item_id in purified_content:
+                        content_embs.append(purified_content[item_id])
                     else:
                         content_embs.append(np.zeros(content_dim, dtype=np.float32))
                     
-                    if collab_embeddings and item_id in collab_embeddings:
-                        collab_embs.append(collab_embeddings[item_id])
+                    if purified_collab and item_id in purified_collab:
+                        collab_embs.append(purified_collab[item_id])
                     else:
                         collab_embs.append(np.zeros(collab_dim, dtype=np.float32))
-                    
-                    if codebook_vectors and item_id in codebook_vectors:
-                        codebook_vecs.append(codebook_vectors[item_id])
-                    else:
-                        codebook_vecs.append(np.zeros((num_code_layers, latent_dim), dtype=np.float32))
                 
                 all_multimodal.append({
                     'content': np.array(content_embs, dtype=np.float32),
                     'collab': np.array(collab_embs, dtype=np.float32),
-                    'codebook': np.array(codebook_vecs, dtype=np.float32)
                 })
         
         num_layers = semantic_mapper.num_layers
@@ -420,15 +401,13 @@ def benchmark_inference(
                 mm = all_multimodal[i % len(all_multimodal)]
                 content_tensor = torch.tensor(mm['content'], dtype=torch.float32, device=device_obj).unsqueeze(0)
                 collab_tensor = torch.tensor(mm['collab'], dtype=torch.float32, device=device_obj).unsqueeze(0)
-                codebook_tensor = torch.tensor(mm['codebook'], dtype=torch.float32, device=device_obj).unsqueeze(0)
                 _ = model.generate(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
                     num_beams=beam_size,
                     max_length=num_layers + 1,
-                    content_embs=content_tensor,
-                    collab_embs=collab_tensor,
-                    history_codebook_vecs=codebook_tensor
+                    purified_content=content_tensor,
+                    purified_collab=collab_tensor
                 )
             else:
                 _ = model.generate(
@@ -482,15 +461,13 @@ def benchmark_inference(
                 mm = all_multimodal[idx]
                 content_tensor = torch.tensor(mm['content'], dtype=torch.float32, device=device_obj).unsqueeze(0)
                 collab_tensor = torch.tensor(mm['collab'], dtype=torch.float32, device=device_obj).unsqueeze(0)
-                codebook_tensor = torch.tensor(mm['codebook'], dtype=torch.float32, device=device_obj).unsqueeze(0)
                 _ = model.generate(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
                     num_beams=beam_size,
                     max_length=num_layers + 1,
-                    content_embs=content_tensor,
-                    collab_embs=collab_tensor,
-                    history_codebook_vecs=codebook_tensor
+                    purified_content=content_tensor,
+                    purified_collab=collab_tensor
                 )
             else:
                 _ = model.generate(
@@ -971,51 +948,33 @@ def benchmark_dataset(
                 logger.info(f"  Total: {param_counts['total']:,}")
                 logger.info(f"  Activated: {activated_params:,}")
                 
-                # Load multimodal embeddings for Prism
-                content_embeddings = None
-                collab_embeddings = None
-                codebook_vectors = None
+                # Load purified multimodal embeddings for Prism
+                purified_content = None
+                purified_collab = None
                 
                 if model_name == 'Prism':
                     training_config = model_config.get('training', None)
                     if training_config and training_config.use_multimodal_fusion:
-                        logger.info("Loading multimodal embeddings for Prism...")
+                        logger.info("Loading purified Stage 1 features for Prism...")
                         
                         from src.recommender.prism.dataset import (
-                            load_content_embeddings,
-                            load_collab_embeddings,
-                            load_codebook_mappings
+                            load_purified_embeddings,
                         )
-                        
-                        # Determine data directory based on dataset
-                        if dataset_name == 'beauty':
-                            data_dir = 'dataset/Amazon-Beauty/processed/beauty-prism-sentenceT5base/Beauty'
-                        elif dataset_name == 'cds':
-                            data_dir = 'dataset/Amazon-CDs/processed/cds-prism-sentenceT5base/CDs'
-                        else:
-                            data_dir = None
-                        
-                        if data_dir:
-                            content_embeddings = load_content_embeddings(data_dir)
-                            logger.info(f"  Loaded content embeddings for {len(content_embeddings)} items")
-                            
-                            collab_path = Path(data_dir) / 'lightgcn' / 'item_embeddings_collab.npy'
-                            if collab_path.exists():
-                                collab_embeddings = load_collab_embeddings(str(collab_path))
-                                logger.info(f"  Loaded collab embeddings for {len(collab_embeddings)} items")
-                            
-                            tokenizer_dir = Path(model_config['data'].semantic_mapping_path).parent
-                            codebook_vectors, _ = load_codebook_mappings(str(tokenizer_dir))
-                            logger.info(f"  Loaded codebook vectors for {len(codebook_vectors)} items")
+
+                        data_cfg = model_config.get('data', None)
+                        if data_cfg and data_cfg.purified_content_path and data_cfg.purified_collab_path:
+                            purified_content, purified_collab, _ = load_purified_embeddings(
+                                data_cfg.purified_content_path,
+                                data_cfg.purified_collab_path,
+                            )
                 
                 # Benchmark inference
                 timing = benchmark_inference(
                     model, model_name, samples, semantic_mapper,
                     device, beam_size,
                     config=model_config,
-                    content_embeddings=content_embeddings,
-                    collab_embeddings=collab_embeddings,
-                    codebook_vectors=codebook_vectors
+                    purified_content=purified_content,
+                    purified_collab=purified_collab
                 )
                 
                 logger.info(f"Timing:")

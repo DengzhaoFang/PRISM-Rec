@@ -10,6 +10,7 @@ Usage:
 """
 
 import argparse
+import json
 import logging
 import random
 import numpy as np
@@ -24,40 +25,84 @@ from .model import create_model
 from .trainer import Trainer
 
 
-def setup_logging(output_dir: Path, log_level: str = "INFO"):
+def load_fast_dev_config(config_path: str) -> dict:
+    with open(config_path, 'r') as f:
+        return json.load(f)
+
+
+def apply_fast_dev_overrides(config: dict, fast_dev: dict):
+    logger = logging.getLogger(__name__)
+    logger.info("\n" + "=" * 80)
+    logger.info("APPLYING FAST DEV OVERRIDES")
+    logger.info("=" * 80)
+
+    training_overrides = fast_dev.get('training', {})
+    model_overrides = fast_dev.get('model', {})
+    data_overrides = fast_dev.get('data', {})
+
+    for key, value in model_overrides.items():
+        if hasattr(config['model'], key):
+            setattr(config['model'], key, value)
+            logger.info(f"  model.{key} = {value}")
+
+    for key, value in training_overrides.items():
+        if hasattr(config['training'], key):
+            setattr(config['training'], key, value)
+            logger.info(f"  training.{key} = {value}")
+
+    fast_dev_state = {
+        'enabled': True,
+        'train_sample_limit': data_overrides.get('train_sample_limit'),
+        'valid_sample_limit': data_overrides.get('valid_sample_limit'),
+        'test_sample_limit': data_overrides.get('test_sample_limit'),
+    }
+    config['fast_dev'] = fast_dev_state
+    logger.info(
+        "  data caps: "
+        f"train={fast_dev_state['train_sample_limit']}, "
+        f"valid={fast_dev_state['valid_sample_limit']}, "
+        f"test={fast_dev_state['test_sample_limit']}"
+    )
+
+
+def setup_logging(output_dir: Path, log_level: str = "INFO", clean: bool = False):
     """Setup logging configuration.
-    
+
     Args:
         output_dir: Directory to save log files
         log_level: Logging level
+        clean: If True, skip console handler and use minimal format (for batch runs)
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     log_file = output_dir / "training.log"
-    
+
     # Create formatters
-    file_formatter = logging.Formatter(
-        '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
+    if clean:
+        file_formatter = logging.Formatter('%(message)s')
+    else:
+        file_formatter = logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        )
     console_formatter = logging.Formatter(
         '%(levelname)s - %(message)s'
     )
-    
+
     # Setup file handler
     file_handler = logging.FileHandler(log_file)
     file_handler.setLevel(getattr(logging, log_level))
     file_handler.setFormatter(file_formatter)
-    
-    # Setup console handler
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(getattr(logging, log_level))
-    console_handler.setFormatter(console_formatter)
-    
+
     # Setup root logger
     root_logger = logging.getLogger()
     root_logger.setLevel(getattr(logging, log_level))
     root_logger.addHandler(file_handler)
-    root_logger.addHandler(console_handler)
-    
+
+    if not clean:
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setLevel(getattr(logging, log_level))
+        console_handler.setFormatter(console_formatter)
+        root_logger.addHandler(console_handler)
+
     logging.info(f"Logging to {log_file}")
 
 
@@ -136,7 +181,23 @@ Examples:
         default=None,
         help='Override output directory from config (optional)'
     )
-    
+    parser.add_argument(
+        '--fast_dev_config',
+        type=str,
+        default=None,
+        help='Path to an external fast-dev JSON config with short-run overrides'
+    )
+
+    # Stage 1 path overrides (for hyperparameter sweep)
+    parser.add_argument('--semantic_mapping_path', type=str, default=None,
+                        help='Override semantic_id_mappings.json path from Stage 1')
+    parser.add_argument('--purified_content_path', type=str, default=None,
+                        help='Override item_purified_content.npy path from Stage 1')
+    parser.add_argument('--purified_collab_path', type=str, default=None,
+                        help='Override item_purified_collab.npy path from Stage 1')
+    parser.add_argument('--purified_dim', type=int, default=None,
+                        help='Override purified feature dimension from Stage 1 (default: 128)')
+
     parser.add_argument(
         '--output_keywords',
         type=str,
@@ -158,7 +219,17 @@ Examples:
         choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
         help='Logging level (default: INFO)'
     )
-    
+
+    parser.add_argument(
+        '--log_clean',
+        action='store_true',
+        default=False,
+        help='Clean logging: no timestamps, no console handler (for batch runs)'
+    )
+
+    parser.add_argument('--eval_every_n_epochs', type=int, default=None,
+                        help='Evaluate every N epochs (default: 3)')
+
     # Verbose logging
     parser.add_argument(
         '--verbose',
@@ -180,139 +251,40 @@ Examples:
     # NEW FEATURES: Multi-source Information Fusion
     # ============================================================
     
-    # Feature 1: Codebook Vector Prediction
-    parser.add_argument(
-        '--use_codebook_prediction',
-        action='store_true',
-        help='Add auxiliary task to predict target codebook vectors'
-    )
-    parser.add_argument(
-        '--codebook_prediction_weight',
-        type=float,
-        default=0.1,
-        help='Loss weight for codebook prediction (default: 0.1)'
-    )
-    
-    # Feature 2: Tag ID Prediction
-    parser.add_argument(
-        '--use_tag_prediction',
-        action='store_true',
-        help='Add auxiliary task to predict hierarchical tag IDs'
-    )
-    parser.add_argument(
-        '--tag_prediction_weight',
-        type=float,
-        default=0.1,
-        help='Loss weight for tag prediction (default: 0.1)'
-    )
-    parser.add_argument(
-        '--predict_tags_first',
-        action='store_true',
-        help='Predict tags before semantic IDs in output sequence'
-    )
-    
-    # Feature 3: Multi-source Embedding Fusion
-    # Feature 3: Multi-source Embedding Fusion
+    # Feature: Multi-source DSI Fusion (Stage 1 purified features)
     parser.add_argument(
         '--use_multimodal_fusion',
         action='store_true',
-        help='Fuse ID, content, and collaborative embeddings'
+        help='Enable DSI: 3-way fusion of ID + purified_content + purified_collab'
     )
     parser.add_argument(
         '--fusion_gate_type',
-        type=str,
-        default='learned',
-        choices=['learned', 'fixed', 'attention', 'moe', 'dense'],
-        help='Type of fusion gating mechanism (default: learned)'
+        type=str, default='moe', choices=['learned', 'fixed', 'attention', 'moe', 'dense'],
+        help='Fusion gating mechanism (default: moe)'
     )
-    parser.add_argument(
-        '--content_emb_weight',
-        type=float,
-        default=0.5,
-        help='Fixed weight for content embeddings (used if fusion_gate_type=fixed)'
-    )
-    parser.add_argument(
-        '--collab_emb_weight',
-        type=float,
-        default=0.3,
-        help='Fixed weight for collaborative embeddings (used if fusion_gate_type=fixed)'
-    )
-    parser.add_argument(
-        '--id_emb_weight',
-        type=float,
-        default=0.2,
-        help='Fixed weight for ID embeddings (used if fusion_gate_type=fixed)'
-    )
-    parser.add_argument(
-        '--freeze_content_emb',
-        action='store_true',
-        default=True,
-        help='Freeze content embeddings (default: True)'
-    )
-    parser.add_argument(
-        '--freeze_collab_emb',
-        action='store_true',
-        default=True,
-        help='Freeze collaborative embeddings (default: True)'
-    )
-    
-    # Collaborative embedding path
-    parser.add_argument(
-        '--collab_embedding_path',
-        type=str,
-        default=None,
-        help='Path to collaborative embeddings NPZ file (optional override)'
-    )
-    
-    # Layer-specific fusion
-    parser.add_argument(
-        '--use_layer_specific_fusion',
-        action='store_true',
-        help='Use layer-specific projections for fusion (recommended for better performance)'
-    )
-    
-    # MOE Fusion Parameters
-    parser.add_argument(
-        '--moe_num_experts',
-        type=int,
-        default=4,
-        help='Number of expert networks for MOE fusion (default: 4)'
-    )
-    parser.add_argument(
-        '--moe_expert_hidden_dim',
-        type=int,
-        default=512,
-        help='Hidden dimension for each expert in MOE fusion (default: 512)'
-    )
-    parser.add_argument(
-        '--moe_top_k',
-        type=int,
-        default=2,
-        help='Number of experts to activate per input in MOE fusion (default: 2)'
-    )
-    parser.add_argument(
-        '--moe_use_load_balancing',
-        action='store_true',
-        help='Use load balancing loss in MOE fusion to ensure all experts are used'
-    )
-    parser.add_argument(
-        '--moe_load_balance_weight',
-        type=float,
-        default=0.01,
-        help='Weight for load balancing loss in MOE fusion (default: 0.01)'
-    )
-    parser.add_argument(
-        '--moe_use_improved_projection',
-        action='store_true',
-        help='Use improved projection mechanism (Content:768→256, ID:128→128, Collab:64→64, +Codebook:32)'
-    )
-    parser.add_argument(
-        '--moe_codebook_dim',
-        type=int,
-        default=32,
-        help='Codebook embedding dimension for improved projection (default: 32)'
-    )
-    
+
+    # MoE parameters
+    parser.add_argument('--moe_num_experts', type=int, default=3,
+                        help='Number of MoE experts (default: 3)')
+    parser.add_argument('--moe_expert_hidden_dim', type=int, default=256,
+                        help='Expert hidden dimension (default: 256)')
+    parser.add_argument('--moe_top_k', type=int, default=2,
+                        help='Top-K experts per input (default: 2)')
+    parser.add_argument('--moe_use_load_balancing', action='store_true',
+                        help='Use MoE load balancing loss')
+    parser.add_argument('--moe_load_balance_weight', type=float, default=0.001,
+                        help='Load balancing loss weight (default: 0.001)')
+
+    # TCAF: Teacher-Conditioned Adaptive Fusion
+    parser.add_argument('--use_teacher_gate', action='store_true',
+                        help='Use teacher-conditioned modality routing (TCAF)')
+    parser.add_argument('--lambda_align', type=float, default=0.0,
+                        help='Teacher alignment loss weight (default: 0.0)')
+    parser.add_argument('--teacher_dim', type=int, default=832,
+                        help='Teacher prototype dimension (default: 832)')
+    parser.add_argument('--teacher_path', type=str, default=None,
+                        help='Path to teacher_prototypes.npy')
+
     # ============================================================
     # NEW FEATURES: Structural Improvements
     # ============================================================
@@ -344,6 +316,18 @@ Examples:
         help='Enable Trie-constrained decoding (ensures all generated paths lead to real items)'
     )
     
+    # Feature 8: Purified Semantic Predictor
+    parser.add_argument(
+        '--use_purified_predictor',
+        action='store_true',
+        help='Enable PurifiedSemanticPredictor: auxiliary MSE loss predicting target z_clean from decoder hidden states'
+    )
+    parser.add_argument(
+        '--purified_predictor_weight',
+        type=float, default=0.1,
+        help='Weight for purified predictor loss (default: 0.1)'
+    )
+
     # Feature 7: Adaptive Temperature Scaling
     parser.add_argument(
         '--use_adaptive_temperature',
@@ -375,18 +359,6 @@ Examples:
         help='Start applying adaptive temperature from this layer (0=all layers, 1=skip Layer 0)'
     )
     
-    # Data paths (from Stage1 output)
-    parser.add_argument('--semantic_mapping_path', type=str, default=None)
-    parser.add_argument('--purified_content_path', type=str, default=None)
-    parser.add_argument('--purified_collab_path', type=str, default=None)
-    parser.add_argument('--purified_dim', type=int, default=128)
-    parser.add_argument('--teacher_path', type=str, default=None)
-    parser.add_argument('--use_purified_predictor', action='store_true')
-    parser.add_argument('--purified_predictor_weight', type=float, default=0.1)
-    parser.add_argument('--eval_every_n_epochs', type=int, default=None)
-    parser.add_argument('--log_clean', action='store_true',
-                        help='Log clean metrics without extra tags')
-
     return parser.parse_args()
 
 
@@ -398,7 +370,7 @@ def _load_data(logger, config: dict):
         config: Configuration dictionary
         
     Returns:
-        Tuple of (train_loader, valid_loader, test_loader, semantic_mapper, codebook_vectors)
+        Tuple of (train_loader, valid_loader, test_loader, semantic_mapper)
     """
     logger.info("\n" + "=" * 80)
     logger.info("LOADING DATASETS")
@@ -407,10 +379,14 @@ def _load_data(logger, config: dict):
     # Get codebook_sizes if available (for variable-length codebooks)
     codebook_sizes = config['model'].__dict__.get('codebook_sizes', None)
     
-    # Check if multimodal fusion is enabled
+    # Check if multimodal fusion or purified predictor is enabled
     use_multimodal = config['training'].use_multimodal_fusion
-    collab_embedding_path = config['data'].collab_embedding_path
-    
+    use_purified_predictor = getattr(config['training'], 'use_purified_predictor', False)
+    purified_content_path = config['data'].purified_content_path
+    purified_collab_path = config['data'].purified_collab_path
+    fast_dev = config.get('fast_dev', {})
+
+    teacher_path = config['training'].teacher_path
     train_dataset, valid_dataset, test_dataset, semantic_mapper = create_datasets(
         sequence_data_dir=config['data'].sequence_data_path,
         semantic_mapping_path=config['data'].semantic_mapping_path,
@@ -420,8 +396,13 @@ def _load_data(logger, config: dict):
         pad_token_id=config['model'].pad_token_id,
         model_config=config['model'],
         codebook_sizes=codebook_sizes,
-        collab_embedding_path=collab_embedding_path,
-        use_multimodal=use_multimodal
+        purified_content_path=purified_content_path,
+        purified_collab_path=purified_collab_path,
+        use_multimodal=use_multimodal or use_purified_predictor,
+        train_sample_limit=fast_dev.get('train_sample_limit'),
+        valid_sample_limit=fast_dev.get('valid_sample_limit'),
+        test_sample_limit=fast_dev.get('test_sample_limit'),
+        teacher_path=teacher_path,
     )
     
     # Log vocabulary statistics
@@ -447,17 +428,16 @@ def _load_data(logger, config: dict):
         use_dynamic_batching=use_dynamic_batching
     )
     
-    return train_loader, valid_loader, test_loader, semantic_mapper, None
+    return train_loader, valid_loader, test_loader, semantic_mapper
 
 
-def _create_model(logger, config: dict, semantic_mapper=None, codebook_vectors=None):
+def _create_model(logger, config: dict, semantic_mapper=None):
     """Create TIGER model.
     
     Args:
         logger: Logger instance
         config: Configuration dictionary
         semantic_mapper: SemanticIDMapper instance
-        codebook_vectors: Dict mapping item_id to codebook vectors (unused, kept for compatibility)
         
     Returns:
         TIGER model instance
@@ -542,46 +522,24 @@ def _build_config_kwargs(args) -> dict:
     # Verbose logging
     if args.verbose:
         config_kwargs['verbose'] = True
+
+    if args.eval_every_n_epochs is not None:
+        config_kwargs['eval_every_n_epochs'] = args.eval_every_n_epochs
     
     # Learning rate scheduler
     if args.lr_scheduler is not None:
         config_kwargs['lr_scheduler'] = args.lr_scheduler
     
-    if args.use_codebook_prediction:
-        config_kwargs['use_codebook_prediction'] = True
-        config_kwargs['codebook_prediction_weight'] = args.codebook_prediction_weight
-    
-    if args.use_tag_prediction:
-        config_kwargs['use_tag_prediction'] = True
-        config_kwargs['tag_prediction_weight'] = args.tag_prediction_weight
-        config_kwargs['predict_tags_first'] = args.predict_tags_first
-    
     if args.use_multimodal_fusion:
         config_kwargs['use_multimodal_fusion'] = True
         config_kwargs['fusion_gate_type'] = args.fusion_gate_type
-        config_kwargs['content_emb_weight'] = args.content_emb_weight
-        config_kwargs['collab_emb_weight'] = args.collab_emb_weight
-        config_kwargs['id_emb_weight'] = args.id_emb_weight
-        config_kwargs['freeze_content_emb'] = args.freeze_content_emb
-        config_kwargs['freeze_collab_emb'] = args.freeze_collab_emb
-        
-        # Layer-specific fusion
-        if args.use_layer_specific_fusion:
-            config_kwargs['use_layer_specific_fusion'] = True
-        
-        # MOE fusion parameters
-        if args.fusion_gate_type == 'moe':
+        if args.fusion_gate_type in ('moe', 'dense'):
             config_kwargs['moe_num_experts'] = args.moe_num_experts
             config_kwargs['moe_expert_hidden_dim'] = args.moe_expert_hidden_dim
             config_kwargs['moe_top_k'] = args.moe_top_k
             config_kwargs['moe_use_load_balancing'] = args.moe_use_load_balancing
             config_kwargs['moe_load_balance_weight'] = args.moe_load_balance_weight
-            config_kwargs['moe_use_improved_projection'] = args.moe_use_improved_projection
-            config_kwargs['moe_codebook_dim'] = args.moe_codebook_dim
-    
-    if args.collab_embedding_path is not None:
-        config_kwargs['collab_embedding_path'] = args.collab_embedding_path
-    
+
     # NEW FEATURES: Structural Improvements
     if args.use_dynamic_batching:
         config_kwargs['use_dynamic_batching'] = True
@@ -605,23 +563,31 @@ def _build_config_kwargs(args) -> dict:
             config_kwargs['tau_max'] = args.tau_max
         if args.tau_start_layer is not None:
             config_kwargs['tau_start_layer'] = args.tau_start_layer
-    
-    # Stage1 data paths
+
+    # Feature 8: Purified Semantic Predictor
+    if args.use_purified_predictor:
+        config_kwargs['use_purified_predictor'] = True
+        config_kwargs['purified_predictor_weight'] = args.purified_predictor_weight
+
+    # TCAF: Teacher-Conditioned Adaptive Fusion
+    if args.use_teacher_gate:
+        config_kwargs['use_teacher_gate'] = True
+    if args.lambda_align > 0:
+        config_kwargs['lambda_align'] = args.lambda_align
+    if args.teacher_dim is not None:
+        config_kwargs['teacher_dim'] = args.teacher_dim
+    if args.teacher_path is not None:
+        config_kwargs['teacher_path'] = args.teacher_path
+
+    # Stage 1 path overrides (for hyperparameter sweep)
     if args.semantic_mapping_path is not None:
         config_kwargs['semantic_mapping_path'] = args.semantic_mapping_path
     if args.purified_content_path is not None:
         config_kwargs['purified_content_path'] = args.purified_content_path
     if args.purified_collab_path is not None:
         config_kwargs['purified_collab_path'] = args.purified_collab_path
-    if args.teacher_path is not None:
-        config_kwargs['teacher_path'] = args.teacher_path
     if args.purified_dim is not None:
         config_kwargs['purified_dim'] = args.purified_dim
-    if args.use_purified_predictor:
-        config_kwargs['use_purified_predictor'] = True
-        config_kwargs['purified_predictor_weight'] = args.purified_predictor_weight
-    if args.eval_every_n_epochs is not None:
-        config_kwargs['eval_every_n_epochs'] = args.eval_every_n_epochs
 
     return config_kwargs
 
@@ -629,7 +595,11 @@ def _build_config_kwargs(args) -> dict:
 def main():
     """Main training function."""
     args = parse_args()
-    
+
+    # Enable TF32 for faster matmul/conv on Ampere+ GPUs (zero accuracy loss)
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+
     # Check if resuming from checkpoint
     if args.resume:
         # Load checkpoint to extract config
@@ -662,9 +632,13 @@ def main():
         # Build configuration with optional overrides
         config_kwargs = _build_config_kwargs(args)
         config = get_config(args.config, **config_kwargs)
-    
+
+    if args.fast_dev_config is not None:
+        fast_dev = load_fast_dev_config(args.fast_dev_config)
+        apply_fast_dev_overrides(config, fast_dev)
+
     # Setup logging
-    setup_logging(Path(config['output_dir']), args.log_level)
+    setup_logging(Path(config['output_dir']), args.log_level, clean=args.log_clean)
     logger = logging.getLogger(__name__)
     
     # Log configuration
@@ -674,10 +648,10 @@ def main():
     set_seed(config['training'].seed)
     
     # Load data
-    train_loader, valid_loader, test_loader, semantic_mapper, codebook_vectors = _load_data(logger, config)
+    train_loader, valid_loader, test_loader, semantic_mapper = _load_data(logger, config)
     
     # Create model
-    model = _create_model(logger, config, semantic_mapper, codebook_vectors)
+    model = _create_model(logger, config, semantic_mapper)
     
     # Create and run trainer
     trainer = Trainer(
@@ -702,4 +676,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
