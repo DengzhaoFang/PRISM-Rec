@@ -94,6 +94,7 @@ def setup_logging(output_dir: Path, log_level: str = "INFO", clean: bool = False
 
     # Setup root logger
     root_logger = logging.getLogger()
+    root_logger.handlers.clear()
     root_logger.setLevel(getattr(logging, log_level))
     root_logger.addHandler(file_handler)
 
