@@ -794,7 +794,7 @@ class TIGER(nn.Module):
         if self.use_multimodal_fusion:
             fusion_gate_type = training_config.fusion_gate_type
             
-            if fusion_gate_type == "moe":
+            if fusion_gate_type in ("moe", "dense"):
                 # Use MoE fusion for non-linear multi-source fusion
                 num_experts = getattr(training_config, 'moe_num_experts', 4)
                 expert_hidden_dim = getattr(training_config, 'moe_expert_hidden_dim', 512)
@@ -803,7 +803,8 @@ class TIGER(nn.Module):
                 load_balance_weight = getattr(training_config, 'moe_load_balance_weight', 0.01)
                 use_improved_projection = getattr(training_config, 'moe_use_improved_projection', False)
                 codebook_dim = getattr(training_config, 'moe_codebook_dim', 32)
-                
+
+                router_type = "sparse" if fusion_gate_type == "moe" else "dense"
                 self.fusion_module = MoEFusion(
                     d_model=model_config.d_model,
                     content_dim=768,
@@ -816,10 +817,11 @@ class TIGER(nn.Module):
                     dropout=model_config.dropout_rate,
                     use_residual=True,
                     use_improved_projection=use_improved_projection,
-                    codebook_dim=codebook_dim
+                    codebook_dim=codebook_dim,
+                    router_type=router_type,
                 )
                 logger.info(
-                    f"MoE fusion enabled: {num_experts} experts, Top-{top_k}, "
+                    f"MoE fusion enabled [{router_type}]: {num_experts} experts, Top-{top_k}, "
                     f"hidden_dim={expert_hidden_dim}, load_balancing={use_load_balancing}, "
                     f"improved_projection={use_improved_projection}"
                 )

@@ -1,9 +1,15 @@
 """
-Mixture of Experts (MoE) Fusion Module.
+MoE Fusion for DSI: 3-way purified Dynamic Semantic Integration.
 
-Provides non-linear multi-source embedding fusion using expert networks.
-Each expert specializes in different fusion patterns, and a router dynamically
-selects the best experts for each input.
+Sources (all projected to d_model):
+  - id_emb:            (B, L, d_model)  — sequence structure
+  - purified_content:  (B, L, 128)      — MCD-denoised semantics
+  - purified_collab:   (B, L, 128)      — MCD-denoised behavior
+  - teacher:           (B, teacher_dim) — stage1 recommendation prototype (optional)
+
+Router selects top-k experts based on concatenated features.
+When teacher is provided, routing is conditioned on the teacher prototype,
+enabling item-level modality reliability estimation.
 """
 
 import torch
@@ -16,518 +22,393 @@ logger = logging.getLogger(__name__)
 
 
 class Expert(nn.Module):
-    """Single expert network for MoE fusion.
-    
-    Each expert learns a different way to combine ID, content, and collab embeddings.
-    Uses diverse initialization to encourage specialization.
-    """
-    
-    def __init__(self, input_dim: int, hidden_dim: int, dropout: float = 0.1, expert_id: int = 0):
-        """Initialize expert network.
-        
-        Args:
-            input_dim: Input dimension (concatenated embeddings)
-            hidden_dim: Hidden layer dimension
-            dropout: Dropout rate
-            expert_id: Expert identifier for diverse initialization
-        """
+    def __init__(self, input_dim, hidden_dim, dropout=0.1):
         super().__init__()
-        
-        self.expert_id = expert_id
-        
-        # Deeper network for more expressive power
         self.net = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.ReLU(),
+            nn.Linear(input_dim, hidden_dim), nn.LayerNorm(hidden_dim), nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim // 2, hidden_dim // 4),  # Output to d_model will be handled by projection
-            nn.LayerNorm(hidden_dim // 4)
+            nn.Linear(hidden_dim, hidden_dim // 2), nn.ReLU(), nn.Dropout(dropout),
+            nn.Linear(hidden_dim // 2, hidden_dim // 4), nn.LayerNorm(hidden_dim // 4),
         )
-        
-        # Diverse initialization: each expert starts with different biases
-        # This encourages experts to specialize in different fusion patterns
-        for i, module in enumerate(self.net.modules()):
-            if isinstance(module, nn.Linear):
-                # Use different gains for different experts
-                gain = 0.3 + (expert_id * 0.2)  # 0.3, 0.5, 0.7, 0.9, ...
-                nn.init.xavier_uniform_(module.weight, gain=gain)
-                
-                # Add small expert-specific bias to encourage diversity
-                if i == 0:  # First layer
-                    nn.init.uniform_(module.bias, -0.1 * (expert_id + 1), 0.1 * (expert_id + 1))
-                else:
-                    nn.init.zeros_(module.bias)
-    
+        for m in self.net.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight, gain=0.5)
+                nn.init.zeros_(m.bias)
+
+    def forward(self, x): return self.net(x)
+
+
+class DenseRouter(nn.Module):
+    """
+    Dense softmax router for modality-specific dynamic fusion.
+
+    Produces continuous weights w ∈ [0,1]³ with Σw = 1 via softmax.
+    No top-k truncation, no load balancing — all 3 modality experts
+    contribute at every time step, eliminating modality dropout.
+
+    Includes an entropy regularization term that penalises weight
+    concentration onto a single expert, preventing modality collapse.
+    """
+
+    def __init__(self, input_dim: int, num_experts: int = 3, dropout: float = 0.1,
+                 entropy_reg_weight: float = 0.01):
+        super().__init__()
+        self.num_experts = num_experts
+        self.entropy_reg_weight = entropy_reg_weight
+        hd = max(input_dim // 2, 128)
+        self.gate = nn.Sequential(
+            nn.Linear(input_dim, hd), nn.LayerNorm(hd), nn.ReLU(), nn.Dropout(dropout),
+            nn.Linear(hd, hd // 2), nn.ReLU(), nn.Linear(hd // 2, num_experts),
+        )
+        for m in self.gate.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight, gain=0.5)
+                nn.init.zeros_(m.bias)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward pass.
-        
-        Args:
-            x: Concatenated embeddings (B, L, input_dim)
-        
-        Returns:
-            Expert output (B, L, hidden_dim // 4)
+        logits = self.gate(x)  # (B, L, num_experts)
+        weights = F.softmax(logits, dim=-1)
+
+        if self.training and self.entropy_reg_weight > 0:
+            avg_w = weights.mean(dim=(0, 1))  # (num_experts,)
+            entropy = -(avg_w * (avg_w + 1e-8).log()).sum()
+            max_entropy = torch.log(torch.tensor(float(self.num_experts), device=x.device))
+            self._entropy_penalty = (max_entropy - entropy) / (max_entropy + 1e-8) * self.entropy_reg_weight
+        else:
+            self._entropy_penalty = torch.tensor(0.0, device=x.device)
+
+        return weights
+
+
+class TeacherConditionedRouter(nn.Module):
+    """
+    Item-level teacher-conditioned modality router.
+
+    Uses the stage1 teacher prototype (which encodes "what recommendation
+    context this item belongs to") to produce item-specific modality weights.
+    This enables head/tail-aware routing: items with rich collaborative context
+    naturally get different modality emphasis than cold-start items.
+
+    Architecture:
+      teacher_proj:  teacher_dim → gate_hidden
+      gate:          [concat_modalities, teacher_proj] → softmax weights
+      modality_temp: learnable per-modality temperature
+    """
+
+    def __init__(self, input_dim: int, teacher_dim: int = 832,
+                 num_experts: int = 3, dropout: float = 0.1,
+                 entropy_reg_weight: float = 0.05):
+        super().__init__()
+        self.num_experts = num_experts
+        self.entropy_reg_weight = entropy_reg_weight
+
+        # Teacher → routing context
+        gate_hidden = 128
+        self.teacher_proj = nn.Sequential(
+            nn.Linear(teacher_dim, gate_hidden),
+            nn.LayerNorm(gate_hidden),
+            nn.GELU(),
+        )
+
+        # Gate: [modality_concat + teacher_context] → expert weights
+        gate_input_dim = input_dim + gate_hidden
+        hd = max(gate_input_dim // 2, 128)
+        self.gate = nn.Sequential(
+            nn.Linear(gate_input_dim, hd), nn.LayerNorm(hd), nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hd, hd // 2), nn.ReLU(),
+            nn.Linear(hd // 2, num_experts),
+        )
+        # Learnable per-modality temperature (initialised to 1, sharpens adaptively)
+        self.modality_temp = nn.Parameter(torch.ones(num_experts))
+
+        for m in self.gate.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight, gain=0.5)
+                nn.init.zeros_(m.bias)
+
+    def forward(self, x: torch.Tensor, teacher: torch.Tensor) -> torch.Tensor:
         """
-        return self.net(x)
+        Args:
+            x: (B, L, input_dim) — concat of [id_emb, content_proj, collab_proj]
+            teacher: (B, teacher_dim) — stage1 teacher prototype
+        Returns:
+            weights: (B, L, num_experts) — softmax modality weights
+        """
+        B, L, _ = x.shape
+
+        t_proj = self.teacher_proj(teacher)           # (B, gate_hidden)
+        t_proj = t_proj.unsqueeze(1).expand(B, L, -1)  # (B, L, gate_hidden)
+
+        gate_input = torch.cat([x, t_proj], dim=-1)    # (B, L, input_dim + gate_hidden)
+        logits = self.gate(gate_input)
+
+        # Temperature-scaled softmax (temp always positive via abs)
+        weights = F.softmax(logits / self.modality_temp.abs().clamp(min=0.1), dim=-1)
+
+        # Entropy regularization
+        if self.training and self.entropy_reg_weight > 0:
+            avg_w = weights.mean(dim=(0, 1))
+            entropy = -(avg_w * (avg_w + 1e-8).log()).sum()
+            max_ent = torch.log(torch.tensor(float(self.num_experts), device=x.device))
+            self._entropy_penalty = (max_ent - entropy) / (max_ent + 1e-8) * self.entropy_reg_weight
+        else:
+            self._entropy_penalty = torch.tensor(0.0, device=x.device)
+
+        return weights
 
 
 class Router(nn.Module):
-    """Router network for MoE with Noisy Top-K routing.
-    
-    Dynamically selects which experts to use for each input based on context.
-    Uses noise injection to promote exploration and prevent expert collapse.
-    Supports Top-K routing with enhanced load balancing.
-    """
-    
-    def __init__(
-        self,
-        input_dim: int,  # Changed from d_model to input_dim
-        num_experts: int,
-        top_k: int = 2,
-        use_load_balancing: bool = True,
-        load_balance_weight: float = 0.1,
-        noise_std: float = 0.1,
-        use_noisy_gating: bool = True
-    ):
-        """Initialize router.
-        
-        Args:
-            input_dim: Input dimension (concatenated embeddings)
-            num_experts: Number of experts
-            top_k: Number of experts to select per input
-            use_load_balancing: Whether to use load balancing loss
-            load_balance_weight: Weight for load balancing loss (increased default)
-            noise_std: Standard deviation for input noise
-            use_noisy_gating: Whether to use noisy top-k gating
-        """
+    def __init__(self, input_dim, num_experts, top_k=2, use_load_balancing=True,
+                 load_balance_weight=0.001, noise_std=0.05, use_noisy_gating=True):
         super().__init__()
-        
         self.num_experts = num_experts
         self.top_k = min(top_k, num_experts)
         self.use_load_balancing = use_load_balancing
         self.load_balance_weight = load_balance_weight
         self.noise_std = noise_std
         self.use_noisy_gating = use_noisy_gating
-        
-        # Router network: maps input to expert scores
-        # Deeper network for better routing decisions
-        hidden_dim = max(input_dim // 2, 128)  # Adaptive hidden dimension
+
+        hd = max(input_dim // 2, 128)
         self.gate = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.ReLU(),
-            nn.Linear(hidden_dim // 2, num_experts)
+            nn.Linear(input_dim, hd), nn.LayerNorm(hd), nn.ReLU(), nn.Dropout(0.1),
+            nn.Linear(hd, hd // 2), nn.ReLU(), nn.Linear(hd // 2, num_experts),
         )
-        
-        # Learnable noise parameters for noisy top-k gating
         if use_noisy_gating:
             self.noise_weight = nn.Linear(input_dim, num_experts)
-            nn.init.zeros_(self.noise_weight.weight)
-            nn.init.zeros_(self.noise_weight.bias)
-        
-        # Initialize with small weights for stable training
-        for module in self.gate.modules():
-            if isinstance(module, nn.Linear):
-                nn.init.xavier_uniform_(module.weight, gain=0.5)
-                nn.init.zeros_(module.bias)
-    
-    def forward(
-        self,
-        x: torch.Tensor,
-        return_stats: bool = False
-    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[Dict]]:
-        """Route inputs to experts with noisy top-k gating.
-        
-        Args:
-            x: Concatenated embeddings (B, L, input_dim)
-            return_stats: Whether to return routing statistics
-        
-        Returns:
-            - expert_indices: Selected expert indices (B, L, top_k)
-            - expert_weights: Weights for selected experts (B, L, top_k)
-            - stats: Optional routing statistics
-        """
-        batch_size, seq_len, _ = x.shape
-        
-        # Add small input noise during training to prevent overfitting
+            nn.init.zeros_(self.noise_weight.weight); nn.init.zeros_(self.noise_weight.bias)
+        for m in self.gate.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight, gain=0.5); nn.init.zeros_(m.bias)
+
+    def forward(self, x, return_stats=False):
         if self.training and self.noise_std > 0:
             x = x + torch.randn_like(x) * self.noise_std
-        
-        # Compute routing scores (clean logits)
-        clean_logits = self.gate(x)  # (B, L, num_experts)
-        
-        # Noisy Top-K Gating (during training only)
+        clean_logits = self.gate(x)
         if self.training and self.use_noisy_gating:
-            # Add learnable noise to logits
-            noise_logits = self.noise_weight(x)
-            noise = torch.randn_like(clean_logits) * F.softplus(noise_logits)
-            noisy_logits = clean_logits + noise
+            noisy_logits = clean_logits + torch.randn_like(clean_logits) * F.softplus(self.noise_weight(x))
         else:
             noisy_logits = clean_logits
-        
-        # Softmax over all experts (not sigmoid) for proper probability distribution
-        all_probs = F.softmax(noisy_logits, dim=-1)  # (B, L, num_experts)
-        
-        # Select top-k experts
-        top_k_probs, top_k_indices = torch.topk(all_probs, self.top_k, dim=-1)  # (B, L, top_k)
-        
-        # Renormalize selected expert weights to sum to 1
+
+        all_probs = F.softmax(noisy_logits, dim=-1)
+        top_k_probs, top_k_indices = torch.topk(all_probs, self.top_k, dim=-1)
         expert_weights = top_k_probs / (top_k_probs.sum(dim=-1, keepdim=True) + 1e-8)
-        
-        # Compute statistics for monitoring and load balancing
+
         stats = None
         if return_stats or self.use_load_balancing:
-            # Expert usage: count how many times each expert is selected (for monitoring)
             expert_usage = torch.zeros(self.num_experts, device=x.device)
             for i in range(self.num_experts):
                 expert_usage[i] = (top_k_indices == i).float().sum()
-            
-            # Normalize to get distribution
-            expert_dist = expert_usage / (expert_usage.sum() + 1e-8)
-            
-            # Enhanced load balancing loss (FIXED: use differentiable probabilities)
-            load_balance_loss = None
+            lb_loss = None
             if self.use_load_balancing:
-                # CRITICAL FIX: Use all_probs (differentiable) instead of expert_usage (discrete)
-                # This ensures gradients can flow back to the router
-                
-                # Method 1: Importance loss (from Switch Transformer paper)
-                # Encourages uniform distribution of routing probabilities
-                # f_i = fraction of tokens routed to expert i
-                # P_i = average routing probability to expert i
-                batch_size, seq_len, _ = all_probs.shape
-                num_tokens = batch_size * seq_len
-                
-                # Fraction of tokens routed to each expert (based on top-k selection)
-                # This is still discrete but used only for the importance term
-                f = expert_usage / num_tokens  # (num_experts,)
-                
-                # Average routing probability to each expert (differentiable!)
-                P = all_probs.mean(dim=(0, 1))  # (num_experts,)
-                
-                # Importance loss: encourages f_i and P_i to be balanced
-                # loss = num_experts * sum(f_i * P_i)
-                # When balanced, each expert gets 1/num_experts of tokens
-                importance_loss = self.num_experts * (f * P).sum()
-                
-                # Method 2: Entropy-based regularization (encourage high entropy)
-                # Higher entropy = more uniform distribution
-                # Use P (differentiable) instead of expert_dist (discrete)
-                entropy = -(P * (P + 1e-8).log()).sum()
-                max_entropy = torch.log(torch.tensor(self.num_experts, dtype=torch.float32, device=x.device))
-                entropy_loss = (max_entropy - entropy) / max_entropy
-                
-                # Combine both losses
-                load_balance_loss = (importance_loss + entropy_loss) * self.load_balance_weight
-                
-                # For monitoring: also compute CV^2 (discrete, not used in loss)
-                mean_usage = expert_usage.mean()
-                var_usage = expert_usage.var()
-                cv_squared = var_usage / (mean_usage ** 2 + 1e-8)
-            
-            stats = {
-                'expert_usage': expert_usage.cpu(),
-                'expert_dist': expert_dist.cpu(),
-                'load_balance_loss': load_balance_loss,
-                'avg_weights': expert_weights.mean(dim=(0, 1)).cpu(),
-                'cv_squared': cv_squared.item() if self.use_load_balancing else 0.0,
-                'entropy': entropy.item() if self.use_load_balancing else 0.0,
-                'importance_loss': importance_loss.item() if self.use_load_balancing else 0.0,
-                'routing_probs': P.cpu() if self.use_load_balancing else None
-            }
-        
+                nt = x.size(0) * x.size(1)
+                f = expert_usage / nt
+                P = all_probs.mean(dim=(0, 1))
+                imp = self.num_experts * (f * P).sum()
+                ent = -(P * (P + 1e-8).log()).sum()
+                max_ent = torch.log(torch.tensor(float(self.num_experts), device=x.device))
+                lb_loss = (imp + (max_ent - ent) / max_ent) * self.load_balance_weight
+            stats = {'expert_usage': expert_usage.cpu(), 'load_balance_loss': lb_loss}
+
         return top_k_indices, expert_weights, stats
 
 
 class MoEFusion(nn.Module):
-    """Mixture of Experts fusion for multi-source embeddings.
-    
-    Uses multiple expert networks to capture non-linear interactions between
-    ID, content, and collaborative embeddings. A router dynamically selects
-    the best experts for each input.
     """
-    
+    3-way MoE fusion with purified features and optional teacher conditioning.
+
+    Supports two router types:
+      - "sparse": top-k sparse gating with load balancing (original)
+      - "dense":  softmax gating, all experts contribute, no truncation
+
+    When use_teacher_gate=True, the dense router is replaced with
+    TeacherConditionedRouter which uses the stage1 teacher prototype
+    for item-level modality reliability estimation.
+    """
+
     def __init__(
         self,
         d_model: int,
-        content_dim: int = 768,
-        collab_dim: int = 64,
-        num_experts: int = 4,
-        expert_hidden_dim: int = 512,
+        purified_dim: int = 128,
+        num_experts: int = 3,
+        expert_hidden_dim: int = 256,
         top_k: int = 2,
-        use_load_balancing: bool = True,
-        load_balance_weight: float = 0.01,
+        use_load_balancing: bool = False,
+        load_balance_weight: float = 0.001,
         dropout: float = 0.1,
         use_residual: bool = True,
-        use_improved_projection: bool = False,
-        codebook_dim: int = 32
+        router_type: str = "sparse",
+        use_teacher_gate: bool = False,
+        teacher_dim: int = 832,
     ):
-        """Initialize MoE fusion module.
-        
-        Args:
-            d_model: Model dimension (T5's d_model)
-            content_dim: Content embedding dimension
-            collab_dim: Collaborative embedding dimension
-            num_experts: Number of expert networks
-            expert_hidden_dim: Hidden dimension for each expert
-            top_k: Number of experts to select per input
-            use_load_balancing: Whether to use load balancing loss
-            load_balance_weight: Weight for load balancing loss
-            dropout: Dropout rate
-            use_residual: Whether to use residual connection with learnable alpha
-            use_improved_projection: Whether to use improved projection mechanism
-            codebook_dim: Codebook embedding dimension (for improved projection)
-        """
         super().__init__()
-        
         self.d_model = d_model
-        self.num_experts = num_experts
-        self.top_k = top_k
         self.use_residual = use_residual
-        self.use_improved_projection = use_improved_projection
-        self.codebook_dim = codebook_dim
-        
-        # Validation: improved projection requires codebook embeddings
-        if use_improved_projection:
-            logger.info(
-                "⚠️ Improved projection enabled. Ensure multimodal fusion is enabled "
-                "and codebook vectors are provided in the dataset!"
-            )
-        
-        # Input normalization
-        self.content_input_norm = nn.LayerNorm(content_dim)
-        self.collab_input_norm = nn.LayerNorm(collab_dim)
-        
-        if use_improved_projection:
-            # Improved projection mechanism:
-            # Content: 768 → 256
-            # ID: 128 → 128 (no projection needed if d_model=128)
-            # Collab: 64 → 64 (no projection needed)
-            # Codebook: 32 (will be concatenated)
-            
-            self.content_proj_dim = 256
-            self.id_proj_dim = d_model  # Keep ID at d_model
-            self.collab_proj_dim = 64
-            
-            # Content projection: 768 → 256
-            self.content_proj = nn.Linear(content_dim, self.content_proj_dim)
-            nn.init.xavier_uniform_(self.content_proj.weight, gain=0.5)
-            nn.init.zeros_(self.content_proj.bias)
-            self.content_norm = nn.LayerNorm(self.content_proj_dim)
-            
-            # Collab projection: 64 → 64 (identity-like, but still learnable)
-            self.collab_proj = nn.Linear(collab_dim, self.collab_proj_dim)
-            nn.init.xavier_uniform_(self.collab_proj.weight, gain=0.5)
-            nn.init.zeros_(self.collab_proj.bias)
-            self.collab_norm = nn.LayerNorm(self.collab_proj_dim)
-            
-            # Total concatenated dimension: 256 + 128 + 64 + 32 = 480
-            concat_dim = self.content_proj_dim + self.id_proj_dim + self.collab_proj_dim + codebook_dim
-            
-            logger.info(
-                f"MoE Fusion with IMPROVED projection: "
-                f"Content({content_dim}→{self.content_proj_dim}) + "
-                f"ID({d_model}→{self.id_proj_dim}) + "
-                f"Collab({collab_dim}→{self.collab_proj_dim}) + "
-                f"Codebook({codebook_dim}) = {concat_dim}D"
-            )
-        
-        else:
-            # Original projection mechanism: all to d_model
-            self.content_proj = nn.Linear(content_dim, d_model)
-            self.collab_proj = nn.Linear(collab_dim, d_model)
-            
-            nn.init.xavier_uniform_(self.content_proj.weight, gain=0.5)
-            nn.init.zeros_(self.content_proj.bias)
-            nn.init.xavier_uniform_(self.collab_proj.weight, gain=0.5)
-            nn.init.zeros_(self.collab_proj.bias)
-            
-            # Layer norms after projection
-            self.content_norm = nn.LayerNorm(d_model)
-            self.collab_norm = nn.LayerNorm(d_model)
-            
-            concat_dim = d_model * 3
-            
-            logger.info(
-                f"MoE Fusion with ORIGINAL projection: "
-                f"Content({content_dim}→{d_model}) + "
-                f"ID({d_model}) + "
-                f"Collab({collab_dim}→{d_model}) = {concat_dim}D"
-            )
-        
-        # Create expert networks with diverse initialization
+        self.router_type = router_type
+        self.num_experts = num_experts
+        self.use_teacher_gate = use_teacher_gate
+
+        self.content_proj = nn.Linear(purified_dim, d_model)
+        self.collab_proj = nn.Linear(purified_dim, d_model)
+        nn.init.xavier_uniform_(self.content_proj.weight, gain=0.5)
+        nn.init.zeros_(self.content_proj.bias)
+        nn.init.xavier_uniform_(self.collab_proj.weight, gain=0.5)
+        nn.init.zeros_(self.collab_proj.bias)
+        self.content_norm = nn.LayerNorm(d_model)
+        self.collab_norm = nn.LayerNorm(d_model)
+
+        concat_dim = d_model * 3  # id + content + collab
+
+        # Experts always operate on their own modality only (d_model-D).
+        # Teacher conditioning is applied at the ROUTING level (via
+        # TeacherConditionedRouter), not inside experts — injecting raw
+        # teacher context into experts acts as noise early in training.
+        expert_input_dim = d_model
         self.experts = nn.ModuleList([
-            Expert(concat_dim, expert_hidden_dim, dropout, expert_id=i)
-            for i in range(num_experts)
+            Expert(expert_input_dim, expert_hidden_dim, dropout)
+            for _ in range(num_experts)
         ])
-        
-        # Output projection: expert output → d_model
         expert_output_dim = expert_hidden_dim // 4
         self.output_proj = nn.Linear(expert_output_dim, d_model)
         nn.init.xavier_uniform_(self.output_proj.weight, gain=0.5)
         nn.init.zeros_(self.output_proj.bias)
         self.output_norm = nn.LayerNorm(d_model)
-        
-        # Router network with enhanced features
-        self.router = Router(
-            input_dim=concat_dim,  # Use concat_dim instead of d_model
-            num_experts=num_experts,
-            top_k=top_k,
-            use_load_balancing=use_load_balancing,
-            load_balance_weight=load_balance_weight,
-            noise_std=0.05,  # Small input noise for robustness
-            use_noisy_gating=True  # Enable noisy top-k gating
-        )
-        
-        # Learnable fusion strength (alpha) for residual connection
+
+        if router_type == "dense":
+            if use_teacher_gate:
+                self.tc_router = TeacherConditionedRouter(
+                    concat_dim, teacher_dim=teacher_dim,
+                    num_experts=num_experts, dropout=dropout,
+                    entropy_reg_weight=0.05)
+                self.dense_router = None
+            else:
+                self.dense_router = DenseRouter(concat_dim, num_experts, dropout,
+                                                entropy_reg_weight=0.0)
+                self.tc_router = None
+            self.router = None
+        else:
+            self.router = Router(concat_dim, num_experts, top_k, use_load_balancing,
+                                 load_balance_weight, noise_std=0.05, use_noisy_gating=True)
+            self.dense_router = None
+            self.tc_router = None
+
         if use_residual:
-            # Initialize to -2.0, which gives sigmoid(-2.0) ≈ 0.12
             self.fusion_alpha = nn.Parameter(torch.tensor(-2.0))
-            logger.info(f"MoE fusion with learnable alpha (starts at ~0.12)")
-        
+
         self.dropout = nn.Dropout(dropout)
-        
-        logger.info(
-            f"MoE Fusion initialized: {num_experts} experts, "
-            f"Top-{top_k}, hidden_dim={expert_hidden_dim}, "
-            f"load_balancing={use_load_balancing}"
-        )
-    
+        tag_parts = ["Dense Softmax"]
+        if use_teacher_gate:
+            tag_parts.append("+TeacherGate")
+        tag = " ".join(tag_parts)
+        logger.info(f"MoE Fusion [{tag}]: {num_experts} experts, hidden={expert_hidden_dim}, concat={concat_dim}D")
+
     def forward(
         self,
         id_emb: torch.Tensor,
-        content_emb: torch.Tensor,
-        collab_emb: torch.Tensor,
-        codebook_emb: Optional[torch.Tensor] = None,
+        purified_content: torch.Tensor,
+        purified_collab: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
-        return_stats: bool = False
+        return_stats: bool = False,
+        teacher: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Optional[Dict]]:
-        """Fuse multi-source embeddings using MoE.
-        
-        Args:
-            id_emb: ID embeddings (B, L, d_model)
-            content_emb: Content embeddings (B, L, content_dim)
-            collab_emb: Collaborative embeddings (B, L, collab_dim)
-            codebook_emb: Codebook embeddings (B, L, codebook_dim), optional
-            attention_mask: Attention mask (B, L)
-            return_stats: Whether to return routing statistics
-        
-        Returns:
-            - Fused embeddings (B, L, d_model)
-            - Optional statistics dictionary
-        """
-        batch_size, seq_len, _ = id_emb.shape
-        
-        # Normalize and project inputs
-        content_emb = self.content_input_norm(content_emb)
-        collab_emb = self.collab_input_norm(collab_emb)
-        
-        content_proj = self.content_norm(self.content_proj(content_emb))
-        collab_proj = self.collab_norm(self.collab_proj(collab_emb))
-        
-        # Concatenate all sources for routing and expert processing
-        if self.use_improved_projection:
-            # Improved projection: Content(256) + ID(128) + Collab(64) + Codebook(32)
-            if codebook_emb is not None:
-                concat = torch.cat([content_proj, id_emb, collab_proj, codebook_emb], dim=-1)
-            else:
-                # CRITICAL: If no codebook embedding provided, use zeros
-                # This must be consistent between training and inference!
-                # Log warning once
-                if not hasattr(self, '_codebook_warning_logged'):
-                    logger.warning(
-                        "⚠️ Improved projection mode enabled but no codebook_emb provided. "
-                        "Using zero padding. Ensure this is consistent between training and inference!"
-                    )
-                    self._codebook_warning_logged = True
-                
-                zero_codebook = torch.zeros(
-                    batch_size, seq_len, self.codebook_dim,
-                    device=id_emb.device, dtype=id_emb.dtype
-                )
-                concat = torch.cat([content_proj, id_emb, collab_proj, zero_codebook], dim=-1)
+        if self.router_type == "dense":
+            return self._dense_forward(id_emb, purified_content, purified_collab,
+                                       attention_mask, return_stats, teacher=teacher)
+        return self._sparse_forward(id_emb, purified_content, purified_collab,
+                                     attention_mask, return_stats)
+
+    def _dense_forward(self, id_emb, purified_content, purified_collab,
+                        attention_mask, return_stats, teacher=None):
+        B, seq_len, _ = id_emb.shape
+
+        content_proj = self.content_norm(self.content_proj(purified_content))
+        collab_proj = self.collab_norm(self.collab_proj(purified_collab))
+        concat = torch.cat([id_emb, content_proj, collab_proj], dim=-1)  # (B, L, concat_dim)
+
+        # Routing: teacher-conditioned (item-specific) or universal
+        if self.tc_router is not None and teacher is not None:
+            weights = self.tc_router(concat, teacher)
+            ent_penalty = self.tc_router._entropy_penalty
+        elif self.dense_router is not None:
+            weights = self.dense_router(concat)
+            ent_penalty = self.dense_router._entropy_penalty
         else:
-            # Original projection: all projected to d_model, then concatenated
-            concat = torch.cat([id_emb, content_proj, collab_proj], dim=-1)  # (B, L, 3*d_model)
-        
-        # Route to experts
-        expert_indices, expert_weights, router_stats = self.router(
-            concat, return_stats=return_stats or self.router.use_load_balancing
-        )  # (B, L, top_k), (B, L, top_k)
-        
-        # Process with selected experts
-        # For efficiency, we process all inputs with all experts, then select
-        expert_outputs = []
-        for expert in self.experts:
-            expert_out = expert(concat)  # (B, L, expert_output_dim)
-            expert_outputs.append(expert_out)
-        
-        expert_outputs = torch.stack(expert_outputs, dim=2)  # (B, L, num_experts, expert_output_dim)
-        
-        # Gather selected expert outputs
-        # expert_indices: (B, L, top_k)
-        # expert_outputs: (B, L, num_experts, expert_output_dim)
-        batch_indices = torch.arange(batch_size, device=id_emb.device).view(-1, 1, 1)
-        seq_indices = torch.arange(seq_len, device=id_emb.device).view(1, -1, 1)
-        
-        selected_outputs = expert_outputs[
-            batch_indices, seq_indices, expert_indices
-        ]  # (B, L, top_k, expert_output_dim)
-        
-        # Weighted combination of selected experts
-        expert_weights_expanded = expert_weights.unsqueeze(-1)  # (B, L, top_k, 1)
-        expert_combined = (selected_outputs * expert_weights_expanded).sum(dim=2)  # (B, L, expert_output_dim)
-        
-        # Project to d_model
-        fused = self.output_norm(self.output_proj(expert_combined))  # (B, L, d_model)
-        
-        # Apply residual connection with learnable alpha
+            # Teacher gate enabled but teacher not provided — use uniform weights
+            weights = torch.ones(B, seq_len, self.num_experts, device=id_emb.device) / self.num_experts
+            ent_penalty = torch.tensor(0.0, device=id_emb.device)
+
+        # Modality-specialized experts: each sees only its own modality.
+        # Teacher guidance is applied at the routing level, not inside experts.
+        e0_out = self.experts[0](id_emb)
+        e1_out = self.experts[1](content_proj)
+        e2_out = self.experts[2](collab_proj)
+
+        expert_outputs = torch.stack([e0_out, e1_out, e2_out], dim=2)  # (B, L, 3, D)
+        combined = (expert_outputs * weights.unsqueeze(-1)).sum(dim=2)  # (B, L, D)
+
+        fused = self.output_norm(self.output_proj(combined))
+
         if self.use_residual:
             alpha = torch.sigmoid(self.fusion_alpha)
             output = id_emb + alpha * (fused - id_emb)
         else:
             output = fused
-        
-        # Prepare statistics
+
+        stats = None
+        if return_stats:
+            avg_weights = weights.mean(dim=(0, 1))
+            stats = {
+                'expert_usage': avg_weights.detach().cpu(),
+                'expert_weights': avg_weights.detach().cpu(),
+                'fusion_alpha': alpha.item() if self.use_residual else None,
+                'entropy_penalty': ent_penalty,
+            }
+
+        return output, stats
+
+    def _sparse_forward(self, id_emb, purified_content, purified_collab,
+                         attention_mask, return_stats):
+        B, seq_len, _ = id_emb.shape
+
+        content_proj = self.content_norm(self.content_proj(purified_content))
+        collab_proj = self.collab_norm(self.collab_proj(purified_collab))
+        concat = torch.cat([id_emb, content_proj, collab_proj], dim=-1)
+
+        expert_indices, expert_weights, router_stats = self.router(concat, return_stats=return_stats)
+
+        N = B * seq_len
+        flat_concat = concat.reshape(N, -1)
+        flat_indices = expert_indices.reshape(N, -1)
+        flat_weights = expert_weights.reshape(N, -1)
+
+        fused = torch.zeros(N, self.d_model, device=id_emb.device)
+
+        for e in range(len(self.experts)):
+            token_mask = (flat_indices == e)
+            if not token_mask.any():
+                continue
+
+            token_rows, rank_cols = token_mask.nonzero(as_tuple=True)
+            expert_input = flat_concat[token_rows]
+            expert_out = self.experts[e](expert_input)
+            projected = self.output_proj(expert_out)
+            w = flat_weights[token_rows, rank_cols].unsqueeze(-1)
+
+            fused.index_add_(0, token_rows, w * projected)
+
+        fused = self.output_norm(fused)
+        fused = fused.reshape(B, seq_len, self.d_model)
+
+        if self.use_residual:
+            alpha = torch.sigmoid(self.fusion_alpha)
+            output = id_emb + alpha * (fused - id_emb)
+        else:
+            output = fused
+
         stats = None
         if return_stats and router_stats is not None:
             stats = router_stats
             if self.use_residual:
                 stats['fusion_alpha'] = alpha.item()
-        
+
         return output, stats
-    
-    def get_routing_stats(
-        self,
-        id_emb: torch.Tensor,
-        content_emb: torch.Tensor,
-        collab_emb: torch.Tensor,
-        codebook_emb: Optional[torch.Tensor] = None,
-        attention_mask: Optional[torch.Tensor] = None
-    ) -> Dict[str, any]:
-        """Get routing statistics for monitoring.
-        
-        Args:
-            id_emb: ID embeddings (B, L, d_model)
-            content_emb: Content embeddings (B, L, content_dim)
-            collab_emb: Collaborative embeddings (B, L, collab_dim)
-            codebook_emb: Codebook embeddings (B, L, codebook_dim), optional
-            attention_mask: Attention mask (B, L)
-        
-        Returns:
-            Dictionary with routing statistics
-        """
-        with torch.no_grad():
-            _, stats = self.forward(
-                id_emb, content_emb, collab_emb,
-                codebook_emb=codebook_emb,
-                attention_mask=attention_mask,
-                return_stats=True
-            )
-            return stats if stats is not None else {}
