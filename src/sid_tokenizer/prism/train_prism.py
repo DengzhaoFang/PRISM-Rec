@@ -228,9 +228,11 @@ class PRISMTrainer:
             from pa_scl_loss import PA_SCL_Loss
             self.pa_scl_loss = PA_SCL_Loss(
                 temperature=self.config.get('pa_scl_temperature', 0.2),
+                topk_K=self.config.get('pa_scl_topk', 5),
             ).to(self.device)
             self.logger.info(f"  PA-SCL: ENABLED (replaces CMA)")
-            self.logger.info(f"    τ={self.config.get('pa_scl_temperature', 0.2)}")
+            self.logger.info(f"    τ={self.config.get('pa_scl_temperature', 0.2)} "
+                             f"K={self.config.get('pa_scl_topk', 5)}")
             self.cma_loss = None  # CMA disabled
         else:
             self.pa_scl_loss = None
@@ -1098,6 +1100,8 @@ def parse_args():
                         help='Temperature for PA-SCL softmax (higher=softer P distribution)')
     parser.add_argument('--lambda_pa_scl', type=float, default=0.1,
                         help='Weight for PA-SCL loss (default 0.1, same scale as CMA)')
+    parser.add_argument('--pa_scl_topk', type=int, default=5,
+                        help='Top-K truncation per row in PA-SCL target (adaptive, relative constant)')
     parser.add_argument('--text_sharpen_gamma', type=float, default=3.0,
                         help='Text similarity sharpening exponent for PA-SCL prior')
     parser.add_argument('--graph_scale_beta', type=float, default=0.05,

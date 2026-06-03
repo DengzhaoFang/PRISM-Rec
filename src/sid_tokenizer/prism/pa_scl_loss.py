@@ -40,14 +40,18 @@ class PA_SCL_Loss(nn.Module):
     Popularity-Aware Soft Contrastive Learning loss.
 
     Args:
-        temperature:     τ for softmax sharpness (default 0.07, same as CMA).
+        temperature:     τ for softmax sharpness (default 0.2).
         eps:             numerical stability for log/div (default 1e-8).
+        topk_K:          per-row Top-K truncation (default 5).  Relative
+                         constant — adaptive across datasets.
     """
 
-    def __init__(self, temperature: float = 0.07, eps: float = 1e-8):
+    def __init__(self, temperature: float = 0.2, eps: float = 1e-8,
+                 topk_K: int = 5):
         super().__init__()
         self.temperature = temperature
         self.eps = eps
+        self.topk_K = topk_K
 
     # ── Public API ──────────────────────────────────────────────────
 
@@ -91,7 +95,17 @@ class PA_SCL_Loss(nn.Module):
         I = torch.eye(B, device=device)
         T_asym = T * (1.0 - I) * W_mask + I  # (B, B)
 
-        # 4. Bidirectional KL to preserve uniform space (prevents collapse)
+        # 4. Top-K sparse truncation (adaptive — no absolute thresholds)
+        #    Only keep the K strongest off-diagonal targets per row.
+        #    K is relative to batch size, not dataset-specific magnitudes.
+        K = min(self.topk_K, B - 1)
+        _, topk_idx = torch.topk(T_asym, k=K, dim=-1)
+        topk_mask = torch.zeros_like(T_asym).scatter_(-1, topk_idx, 1.0)
+        T_asym = T_asym * topk_mask
+        # Force diagonal = 1.0 (self-alignment always preserved)
+        T_asym = torch.where(I.bool(), torch.ones_like(T_asym), T_asym)
+
+        # 5. Bidirectional KL to preserve uniform space (prevents collapse)
         sim = (h_t @ h_c.T) / self.temperature
 
         # Text → Collab
