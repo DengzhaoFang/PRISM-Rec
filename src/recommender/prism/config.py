@@ -227,7 +227,7 @@ class TrainingConfig:
     
     # Feature 3: Multi-source Embedding Fusion
     use_multimodal_fusion: bool = False
-    fusion_gate_type: str = "learned"  # Options: "learned", "fixed", "attention", "moe"
+    fusion_gate_type: str = "learned"  # Options: "learned", "fixed", "attention", "moe", "dense"
     content_emb_weight: float = 0.5  # Fixed weight for content (if fusion_gate_type="fixed")
     collab_emb_weight: float = 0.3  # Fixed weight for collab (if fusion_gate_type="fixed")
     id_emb_weight: float = 0.2  # Fixed weight for ID (if fusion_gate_type="fixed")

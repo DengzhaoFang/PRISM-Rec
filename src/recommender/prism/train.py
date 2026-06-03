@@ -222,7 +222,7 @@ Examples:
         '--fusion_gate_type',
         type=str,
         default='learned',
-        choices=['learned', 'fixed', 'attention', 'moe'],
+        choices=['learned', 'fixed', 'attention', 'moe', 'dense'],
         help='Type of fusion gating mechanism (default: learned)'
     )
     parser.add_argument(
