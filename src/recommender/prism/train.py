@@ -375,6 +375,16 @@ Examples:
         help='Start applying adaptive temperature from this layer (0=all layers, 1=skip Layer 0)'
     )
     
+    # Data paths (from Stage1 output)
+    parser.add_argument('--semantic_mapping_path', type=str, default=None)
+    parser.add_argument('--purified_content_path', type=str, default=None)
+    parser.add_argument('--purified_collab_path', type=str, default=None)
+    parser.add_argument('--purified_dim', type=int, default=128)
+    parser.add_argument('--teacher_path', type=str, default=None)
+    parser.add_argument('--use_purified_predictor', action='store_true')
+    parser.add_argument('--purified_predictor_weight', type=float, default=0.1)
+    parser.add_argument('--eval_every_n_epochs', type=int, default=None)
+
     return parser.parse_args()
 
 
@@ -594,6 +604,23 @@ def _build_config_kwargs(args) -> dict:
         if args.tau_start_layer is not None:
             config_kwargs['tau_start_layer'] = args.tau_start_layer
     
+    # Stage1 data paths
+    if args.semantic_mapping_path is not None:
+        config_kwargs['semantic_mapping_path'] = args.semantic_mapping_path
+    if args.purified_content_path is not None:
+        config_kwargs['purified_content_path'] = args.purified_content_path
+    if args.purified_collab_path is not None:
+        config_kwargs['purified_collab_path'] = args.purified_collab_path
+    if args.teacher_path is not None:
+        config_kwargs['teacher_path'] = args.teacher_path
+    if args.purified_dim is not None:
+        config_kwargs['purified_dim'] = args.purified_dim
+    if args.use_purified_predictor:
+        config_kwargs['use_purified_predictor'] = True
+        config_kwargs['purified_predictor_weight'] = args.purified_predictor_weight
+    if args.eval_every_n_epochs is not None:
+        config_kwargs['eval_every_n_epochs'] = args.eval_every_n_epochs
+
     return config_kwargs
 
 
