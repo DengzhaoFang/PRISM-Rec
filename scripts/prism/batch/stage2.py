@@ -50,14 +50,20 @@ TARGET_STAGE1_EXPERIMENTS = []
 TCAF_ABLATION = []
 
 # Sparse MoE ablation: test (num_experts, top_k) combinations
-# against the dense MoE baseline.  Each entry: (name, stage1_variant, extra_rec_args)
-# The stage1_variant should match the directory name in STAGE1_DIR.
+# against the dense MoE baseline.  Each entry: (name, stage1_variant, extra_rec_args).
+# stage1_variant=None means "use the first auto-discovered stage1 experiment".
+# Controlled by --ablation sparse_moe (or set ABLATION env var).
 SPARSE_MOE_ABLATION = [
     ("sparse_moe_e3k1",  None, ["--moe_num_experts", "3", "--moe_top_k", "1"]),
     ("sparse_moe_e3k2",  None, ["--moe_num_experts", "3", "--moe_top_k", "2"]),
     ("sparse_moe_e5k2",  None, ["--moe_num_experts", "5", "--moe_top_k", "2"]),
     ("sparse_moe_e5k3",  None, ["--moe_num_experts", "5", "--moe_top_k", "3"]),
 ]
+
+# Active ablation mode (set via --ablation or ABLATION env var).
+# "" = normal auto-discovery mode (stage1 variants × fixed stage2 config).
+# "sparse_moe" = single stage1 × multiple stage2 sparse MoE configs.
+ABLATION_MODE = os.environ.get("ABLATION", "")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -550,51 +556,52 @@ class RecBatchRunner:
 
             self.experiments.append(exp)
 
-        # Sparse MoE ablation: all variants share the same stage1 experiment
-        for moe_name, stage1_variant, extra_args in SPARSE_MOE_ABLATION:
-            # If variant is None, use the first auto-discovered experiment's stage1 dir
-            if stage1_variant is None:
-                if not stage1_dirs:
-                    print(f"  [skip] sparse_moe/{moe_name}: no stage1 experiments found")
+        # Ablation mode: single stage1 × multiple stage2 configs.
+        # Only active when --ablation sparse_moe is set (or ABLATION env var).
+        if ABLATION_MODE == "sparse_moe":
+            for moe_name, stage1_variant, extra_args in SPARSE_MOE_ABLATION:
+                if stage1_variant is None:
+                    if not stage1_dirs:
+                        print(f"  [skip] sparse_moe/{moe_name}: no stage1 experiments found")
+                        continue
+                    variant = list(stage1_dirs.keys())[0]
+                else:
+                    variant = stage1_variant
+
+                d = stage1_dirs.get(variant)
+                if d is None:
+                    print(f"  [skip] sparse_moe/{moe_name}: stage1 variant '{variant}' not found")
                     continue
-                variant = list(stage1_dirs.keys())[0]
-            else:
-                variant = stage1_variant
 
-            d = stage1_dirs.get(variant)
-            if d is None:
-                print(f"  [skip] sparse_moe/{moe_name}: stage1 variant '{variant}' not found")
-                continue
+                semantic_map = d / "semantic_id_mappings.json"
+                purified_content = d / "item_purified_content.npy"
+                purified_collab = d / "item_purified_collab.npy"
 
-            semantic_map = d / "semantic_id_mappings.json"
-            purified_content = d / "item_purified_content.npy"
-            purified_collab = d / "item_purified_collab.npy"
+                if not semantic_map.exists():
+                    print(f"  [skip] sparse_moe/{moe_name}: missing semantic_id_mappings.json")
+                    continue
 
-            if not semantic_map.exists():
-                print(f"  [skip] sparse_moe/{moe_name}: missing semantic_id_mappings.json")
-                continue
+                output_dir = self.output_base / moe_name
+                moe_extra = ["--fusion_gate_type", "moe"] + extra_args
+                exp = RecExperiment(
+                    name=moe_name,
+                    stage1_dir=d,
+                    output_dir=output_dir,
+                    semantic_map=semantic_map,
+                    purified_content=purified_content,
+                    purified_collab=purified_collab,
+                    purified_dim=128,
+                    log_path=output_dir / "training.log",
+                    extra_rec_args=moe_extra,
+                )
 
-            output_dir = self.output_base / moe_name
-            moe_extra = ["--fusion_gate_type", "moe"] + extra_args
-            exp = RecExperiment(
-                name=moe_name,
-                stage1_dir=d,
-                output_dir=output_dir,
-                semantic_map=semantic_map,
-                purified_content=purified_content,
-                purified_collab=purified_collab,
-                purified_dim=128,
-                log_path=output_dir / "training.log",
-                extra_rec_args=moe_extra,
-            )
+                if (output_dir / "best_model.pt").exists():
+                    exp.status = "skipped"
+                    log_m = parse_rec_metrics(self._resolve_log_path(exp))
+                    for k, v in log_m.items():
+                        setattr(exp, k, v)
 
-            if (output_dir / "best_model.pt").exists():
-                exp.status = "skipped"
-                log_m = parse_rec_metrics(self._resolve_log_path(exp))
-                for k, v in log_m.items():
-                    setattr(exp, k, v)
-
-            self.experiments.append(exp)
+                self.experiments.append(exp)
 
     def launch(self, exp: RecExperiment, gpu: int):
         """Launch recommender training on a specific GPU."""
@@ -858,11 +865,17 @@ def parse_args():
                    help="Pass a fast-dev JSON config through to each recommender run")
     p.add_argument("--refresh", type=float, default=3.0,
                    help="Dashboard refresh interval in seconds")
+    p.add_argument("--ablation", type=str, default=os.environ.get("ABLATION", ""),
+                   choices=["", "sparse_moe"],
+                   help="Ablation mode: ''=auto-discover stage1 variants (default), "
+                        "'sparse_moe'=single stage1 × multiple sparse MoE configs")
     return p.parse_args()
 
 
 def main():
     args = parse_args()
+    global ABLATION_MODE
+    ABLATION_MODE = args.ablation
     gpus = None
     if args.gpus:
         gpus = [int(x.strip()) for x in args.gpus.split(",")]
