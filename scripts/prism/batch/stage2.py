@@ -402,7 +402,10 @@ class RecBatchRunner:
         return EXPERIMENT_NAME_ALIASES.get(name.strip().lower(), name.strip())
 
     def _resolve_target_experiments(self, names: List[str]) -> List[str]:
-        """If names is empty, auto-discover all valid dirs in stage1_base."""
+        """If names is empty, auto-discover all valid dirs in stage1_base.
+        In ablation mode, skip auto-discovery entirely."""
+        if ABLATION_MODE:
+            return []
         if not names:
             if not self.stage1_base.exists():
                 print(f"ERROR: Stage1 output dir not found: {self.stage1_base}")

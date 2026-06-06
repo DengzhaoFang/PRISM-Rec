@@ -259,11 +259,12 @@ class MoEFusion(nn.Module):
 
         concat_dim = d_model * 3  # id + content + collab
 
-        # Experts always operate on their own modality only (d_model-D).
-        # Teacher conditioning is applied at the ROUTING level (via
-        # TeacherConditionedRouter), not inside experts — injecting raw
-        # teacher context into experts acts as noise early in training.
-        expert_input_dim = d_model
+        # Dense mode: each expert sees only its own modality (d_model-D).
+        # Sparse mode: experts see the full concat (top-k router selects).
+        if router_type == "dense":
+            expert_input_dim = d_model
+        else:
+            expert_input_dim = concat_dim
         self.experts = nn.ModuleList([
             Expert(expert_input_dim, expert_hidden_dim, dropout)
             for _ in range(num_experts)
