@@ -315,6 +315,7 @@ class MoEFusion(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
         return_stats: bool = False,
         teacher: Optional[torch.Tensor] = None,
+        **kwargs,
     ) -> Tuple[torch.Tensor, Optional[Dict]]:
         codebook_emb = kwargs.pop('codebook_emb', None)
         if self.router_type == "dense":
