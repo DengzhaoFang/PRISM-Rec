@@ -60,6 +60,11 @@ def collate_fn(batch: List[Dict], pad_token_id: int = 0, use_dynamic_batching: b
             torch.from_numpy(item['history_purified_collab']) for item in batch
         ])
 
+    if 'history_codebook_zq' in batch[0]:
+        result['history_codebook_zq'] = torch.stack([
+            torch.from_numpy(item['history_codebook_zq']) for item in batch
+        ])
+
     if 'target_z_clean' in batch[0]:
         result['target_z_clean'] = torch.stack([
             torch.from_numpy(item['target_z_clean']) for item in batch

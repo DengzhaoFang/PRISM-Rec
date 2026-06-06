@@ -250,14 +250,18 @@ class MoEFusion(nn.Module):
 
         self.content_proj = nn.Linear(purified_dim, d_model)
         self.collab_proj = nn.Linear(purified_dim, d_model)
+        self.codebook_proj = nn.Linear(32, d_model)  # codebook z_q (32D → d_model)
         nn.init.xavier_uniform_(self.content_proj.weight, gain=0.5)
         nn.init.zeros_(self.content_proj.bias)
         nn.init.xavier_uniform_(self.collab_proj.weight, gain=0.5)
         nn.init.zeros_(self.collab_proj.bias)
+        nn.init.xavier_uniform_(self.codebook_proj.weight, gain=0.5)
+        nn.init.zeros_(self.codebook_proj.bias)
         self.content_norm = nn.LayerNorm(d_model)
         self.collab_norm = nn.LayerNorm(d_model)
+        self.codebook_norm = nn.LayerNorm(d_model)
 
-        concat_dim = d_model * 3  # id + content + collab
+        concat_dim = d_model * 4  # id + content + collab + codebook
 
         # Dense mode: each expert sees only its own modality (d_model-D).
         # Sparse mode: experts see the full concat (top-k router selects).
@@ -312,19 +316,24 @@ class MoEFusion(nn.Module):
         return_stats: bool = False,
         teacher: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Optional[Dict]]:
+        codebook_emb = kwargs.pop('codebook_emb', None)
         if self.router_type == "dense":
             return self._dense_forward(id_emb, purified_content, purified_collab,
-                                       attention_mask, return_stats, teacher=teacher)
+                                       attention_mask, return_stats, teacher=teacher,
+                                       codebook_emb=codebook_emb)
         return self._sparse_forward(id_emb, purified_content, purified_collab,
-                                     attention_mask, return_stats)
+                                     attention_mask, return_stats, codebook_emb=codebook_emb)
 
     def _dense_forward(self, id_emb, purified_content, purified_collab,
-                        attention_mask, return_stats, teacher=None):
+                        attention_mask, return_stats, teacher=None, codebook_emb=None):
         B, seq_len, _ = id_emb.shape
 
         content_proj = self.content_norm(self.content_proj(purified_content))
         collab_proj = self.collab_norm(self.collab_proj(purified_collab))
-        concat = torch.cat([id_emb, content_proj, collab_proj], dim=-1)  # (B, L, concat_dim)
+        concat_parts = [id_emb, content_proj, collab_proj]
+        if codebook_emb is not None:
+            concat_parts.append(self.codebook_norm(self.codebook_proj(codebook_emb)))
+        concat = torch.cat(concat_parts, dim=-1)
 
         # Routing: teacher-conditioned (item-specific) or universal
         if self.tc_router is not None and teacher is not None:
@@ -368,12 +377,15 @@ class MoEFusion(nn.Module):
         return output, stats
 
     def _sparse_forward(self, id_emb, purified_content, purified_collab,
-                         attention_mask, return_stats):
+                         attention_mask, return_stats, codebook_emb=None):
         B, seq_len, _ = id_emb.shape
 
         content_proj = self.content_norm(self.content_proj(purified_content))
         collab_proj = self.collab_norm(self.collab_proj(purified_collab))
-        concat = torch.cat([id_emb, content_proj, collab_proj], dim=-1)
+        concat_parts = [id_emb, content_proj, collab_proj]
+        if codebook_emb is not None:
+            concat_parts.append(self.codebook_norm(self.codebook_proj(codebook_emb)))
+        concat = torch.cat(concat_parts, dim=-1)
 
         expert_indices, expert_weights, router_stats = self.router(concat, return_stats=return_stats)
 

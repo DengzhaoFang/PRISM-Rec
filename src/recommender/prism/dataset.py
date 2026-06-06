@@ -17,18 +17,20 @@ import os
 logger = logging.getLogger(__name__)
 
 
-def load_purified_embeddings(content_path: str, collab_path: str) -> Tuple[Dict[int, np.ndarray], Dict[int, np.ndarray], Dict[int, np.ndarray]]:
-    """Load Stage 1 MCD-purified embeddings: h_t_hat (128D) and h_c_hat (128D).
+def load_purified_embeddings(content_path: str, collab_path: str) -> Tuple[Dict[int, np.ndarray], Dict[int, np.ndarray], Dict[int, np.ndarray], Dict[int, np.ndarray]]:
+    """Load Stage 1 purified embeddings.
 
-    Expects 3 companion files:
-      - item_purified_ids.npy       (n_items,) int64 item IDs
-      - item_purified_content.npy   (n_items, 128) h_t_hat
-      - item_purified_collab.npy    (n_items, 128) h_c_hat
-      - item_purified_z_clean.npy   (n_items, 256) [h_t_hat || h_c_hat]
+    Expects:
+      - item_purified_ids.npy        (n_items,) int64 item IDs
+      - item_purified_content.npy    (n_items, 128) h_t
+      - item_purified_collab.npy     (n_items, 128) h_c
+      - item_purified_z_clean.npy    (n_items, 256) [h_c || h_t]
+      - item_codebook_zq.npy         (n_items, 32)  z_q (optional)
     """
     content_dir = os.path.dirname(content_path)
     ids_path = os.path.join(content_dir, 'item_purified_ids.npy')
     z_clean_path = os.path.join(content_dir, 'item_purified_z_clean.npy')
+    zq_path = os.path.join(content_dir, 'item_codebook_zq.npy')
 
     if not os.path.exists(content_path) or not os.path.exists(collab_path):
         logger.warning(f"Purified embeddings not found, DSI fusion will be disabled")
@@ -58,13 +60,21 @@ def load_purified_embeddings(content_path: str, collab_path: str) -> Tuple[Dict[
             for i in range(len(item_ids))
         }
 
+    # Optional: codebook z_q (32D quantized latent from Stage 1 RQ-VAE)
+    codebook_dict = {}
+    if os.path.exists(zq_path):
+        zq_arr = np.load(zq_path)
+        codebook_dict = {int(item_ids[i]): zq_arr[i].astype(np.float32) for i in range(len(item_ids))}
+
     logger.info(f"Loaded purified features for {len(content_dict)} items")
     logger.info(f"  Purified content dim: {content_arr.shape[1]}")
     logger.info(f"  Purified collab dim: {collab_arr.shape[1]}")
     if z_clean_arr is not None:
         logger.info(f"  Purified z_clean dim: {z_clean_arr.shape[1]}")
+    if codebook_dict:
+        logger.info(f"  Codebook z_q dim: {zq_arr.shape[1]}")
 
-    return content_dict, collab_dict, z_clean_dict
+    return content_dict, collab_dict, z_clean_dict, codebook_dict
 
 
 def load_content_embeddings(data_dir: str) -> Dict[int, np.ndarray]:
@@ -258,6 +268,7 @@ class GenRecDataset(Dataset):
         purified_content: Optional[Dict[int, np.ndarray]] = None,
         purified_collab: Optional[Dict[int, np.ndarray]] = None,
         purified_z_clean: Optional[Dict[int, np.ndarray]] = None,
+        purified_codebook: Optional[Dict[int, np.ndarray]] = None,
         use_multimodal: bool = False,
         sample_limit: Optional[int] = None,
         teacher_dict: Optional[Dict[int, np.ndarray]] = None,
@@ -267,11 +278,13 @@ class GenRecDataset(Dataset):
         self.mode = mode
         self.max_len = max_len
         self.pad_token_id = pad_token_id
-        self.purified_content = purified_content or {}  # MCD h_t_hat (128D)
-        self.purified_collab = purified_collab or {}    # MCD h_c_hat (128D)
+        self.purified_content = purified_content or {}
+        self.purified_collab = purified_collab or {}
         self.purified_z_clean = purified_z_clean or {}
+        self.purified_codebook = purified_codebook or {}
         self.use_multimodal = use_multimodal
         self.teacher = teacher_dict or {}
+        self.codebook_dim = 32
 
         self.purified_dim = 128
         if self.purified_content:
@@ -345,6 +358,14 @@ class GenRecDataset(Dataset):
                 'history_purified_collab': history_purified_collab,
             })
 
+            # Codebook z_q (32D quantized latent)
+            if self.purified_codebook:
+                history_codebook = np.zeros((self.max_len, self.codebook_dim), dtype=np.float32)
+                for i, iid in enumerate(history_item_ids_padded):
+                    if iid in self.purified_codebook:
+                        history_codebook[i] = self.purified_codebook[iid]
+                result['history_codebook_zq'] = history_codebook
+
             # Stage 1 exports z_clean as [h_t_hat || h_c_hat]; use it directly.
             target_z_clean = np.zeros(self.purified_dim * 2, dtype=np.float32)
             if target_item_id in self.purified_z_clean:
@@ -416,7 +437,7 @@ def create_datasets(
     purified_z_clean_dict = {}
     if use_multimodal and purified_content_path and purified_collab_path:
         logger.info("Loading Stage 1 purified features for DSI fusion...")
-        purified_content_dict, purified_collab_dict, purified_z_clean_dict = load_purified_embeddings(
+        purified_content_dict, purified_collab_dict, purified_z_clean_dict, purified_codebook_dict = load_purified_embeddings(
             purified_content_path, purified_collab_path
         )
 
@@ -441,6 +462,7 @@ def create_datasets(
         semantic_mapper=semantic_mapper, max_len=max_len, pad_token_id=pad_token_id,
         purified_content=purified_content_dict, purified_collab=purified_collab_dict,
         purified_z_clean=purified_z_clean_dict,
+        purified_codebook=purified_codebook_dict,
         use_multimodal=use_multimodal,
         teacher_dict=teacher_dict,
     )

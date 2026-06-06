@@ -176,6 +176,9 @@ class Trainer:
             if use_multimodal and 'history_purified_content' in batch:
                 purified_content = batch['history_purified_content'].to(self.device)
                 purified_collab = batch['history_purified_collab'].to(self.device)
+            codebook_zq = None
+            if 'history_codebook_zq' in batch:
+                codebook_zq = batch['history_codebook_zq'].to(self.device)
             if use_predictor and 'target_z_clean' in batch:
                 target_z_clean = batch['target_z_clean'].to(self.device)
             if 'target_teacher' in batch:
@@ -186,7 +189,7 @@ class Trainer:
             output = self.model(
                 input_ids=input_ids, attention_mask=attention_mask, labels=labels,
                 purified_content=purified_content, purified_collab=purified_collab,
-                target_z_clean=target_z_clean,
+                codebook_zq=codebook_zq, target_z_clean=target_z_clean,
                 item_ids=item_ids, teacher=teacher, return_dict=True
             )
 

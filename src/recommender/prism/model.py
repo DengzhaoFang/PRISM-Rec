@@ -373,6 +373,7 @@ class TIGER(nn.Module):
         labels: Optional[torch.Tensor] = None,
         purified_content: Optional[torch.Tensor] = None,
         purified_collab: Optional[torch.Tensor] = None,
+        codebook_zq: Optional[torch.Tensor] = None,
         target_z_clean: Optional[torch.Tensor] = None,
         item_ids: Optional[List[int]] = None,
         teacher: Optional[torch.Tensor] = None,
@@ -389,12 +390,15 @@ class TIGER(nn.Module):
             num_tokens = self.model_config.num_code_layers
             content_bc = self.broadcast_item_to_tokens(purified_content, None, num_tokens)
             collab_bc = self.broadcast_item_to_tokens(purified_collab, None, num_tokens)
+            codebook_bc = None
+            if codebook_zq is not None:
+                codebook_bc = self.broadcast_item_to_tokens(codebook_zq, None, num_tokens)
 
             if isinstance(self.fusion_module, MoEFusion):
                 fused_emb, fusion_stats = self.fusion_module(
                     id_emb, content_bc, collab_bc,
                     attention_mask=attention_mask, return_stats=True,
-                    teacher=teacher,
+                    teacher=teacher, codebook_emb=codebook_bc,
                 )
             else:
                 fused_emb = self.fusion_module(id_emb, content_bc, collab_bc)

@@ -54,10 +54,14 @@ TCAF_ABLATION = []
 # stage1_variant=None means "use the first auto-discovered stage1 experiment".
 # Controlled by --ablation sparse_moe (or set ABLATION env var).
 SPARSE_MOE_ABLATION = [
-    ("sparse_moe_e3k1",  None, ["--moe_num_experts", "3", "--moe_top_k", "1"]),
-    ("sparse_moe_e3k2",  None, ["--moe_num_experts", "3", "--moe_top_k", "2"]),
-    ("sparse_moe_e5k2",  None, ["--moe_num_experts", "5", "--moe_top_k", "2"]),
-    ("sparse_moe_e5k3",  None, ["--moe_num_experts", "5", "--moe_top_k", "3"]),
+    ("sparse_moe_e3k1",  None, ["--moe_num_experts", "3", "--moe_top_k", "1",
+                                 "--moe_load_balance_weight", "0.1"]),
+    ("sparse_moe_e3k2",  None, ["--moe_num_experts", "3", "--moe_top_k", "2",
+                                 "--moe_load_balance_weight", "0.1"]),
+    ("sparse_moe_e5k2",  None, ["--moe_num_experts", "5", "--moe_top_k", "2",
+                                 "--moe_load_balance_weight", "0.1"]),
+    ("sparse_moe_e5k3",  None, ["--moe_num_experts", "5", "--moe_top_k", "3",
+                                 "--moe_load_balance_weight", "0.1"]),
 ]
 
 # Active ablation mode (set via --ablation or ABLATION env var).
