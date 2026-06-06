@@ -19,6 +19,9 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 STAGE1_DIR="${STAGE1_DIR:-scripts/output/prism_tokenizer/beauty/hparam_stage1_PASCL_best}"
 STAGE1_EXPERIMENTS="${STAGE1_EXPERIMENTS:-}"
 STAGE2_OUTPUT="${STAGE2_OUTPUT:-hparam_stage2_PASCL_sparseMoe}"
+# Ablation mode: comment out for normal auto-discover, uncomment for sparse MoE
+# ABLATION="${ABLATION:-sparse_moe}"
+export ABLATION
 FAST_DEV_CONFIG="${FAST_DEV_CONFIG:-}"
 GPUS="${GPUS:-}"
 # ──────────────────────────────────────────────────────────────────────────

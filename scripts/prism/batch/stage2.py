@@ -865,17 +865,11 @@ def parse_args():
                    help="Pass a fast-dev JSON config through to each recommender run")
     p.add_argument("--refresh", type=float, default=3.0,
                    help="Dashboard refresh interval in seconds")
-    p.add_argument("--ablation", type=str, default=os.environ.get("ABLATION", ""),
-                   choices=["", "sparse_moe"],
-                   help="Ablation mode: ''=auto-discover stage1 variants (default), "
-                        "'sparse_moe'=single stage1 × multiple sparse MoE configs")
     return p.parse_args()
 
 
 def main():
     args = parse_args()
-    global ABLATION_MODE
-    ABLATION_MODE = args.ablation
     gpus = None
     if args.gpus:
         gpus = [int(x.strip()) for x in args.gpus.split(",")]
