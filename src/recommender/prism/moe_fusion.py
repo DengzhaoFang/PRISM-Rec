@@ -334,6 +334,8 @@ class MoEFusion(nn.Module):
         concat_parts = [id_emb, content_proj, collab_proj]
         if codebook_emb is not None:
             concat_parts.append(self.codebook_norm(self.codebook_proj(codebook_emb)))
+        else:
+            concat_parts.append(torch.zeros(B, seq_len, self.d_model, device=id_emb.device))
         concat = torch.cat(concat_parts, dim=-1)
 
         # Routing: teacher-conditioned (item-specific) or universal
@@ -386,6 +388,8 @@ class MoEFusion(nn.Module):
         concat_parts = [id_emb, content_proj, collab_proj]
         if codebook_emb is not None:
             concat_parts.append(self.codebook_norm(self.codebook_proj(codebook_emb)))
+        else:
+            concat_parts.append(torch.zeros(B, seq_len, self.d_model, device=id_emb.device))
         concat = torch.cat(concat_parts, dim=-1)
 
         expert_indices, expert_weights, router_stats = self.router(concat, return_stats=return_stats)
