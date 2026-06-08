@@ -524,15 +524,6 @@ class RecBatchRunner:
 
             self.experiments.append(exp)
 
-
-            if (output_dir / "best_model.pt").exists():
-                exp.status = "skipped"
-                log_m = parse_rec_metrics(self._resolve_log_path(exp))
-                for k, v in log_m.items():
-                    setattr(exp, k, v)
-
-            self.experiments.append(exp)
-
         # Ablation mode: single stage1 × multiple stage2 configs.
         # Only active when --ablation sparse_moe is set (or ABLATION env var).
         if ABLATION_MODE == "sparse_moe":
