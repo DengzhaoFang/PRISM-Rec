@@ -260,22 +260,56 @@ def get_sports_config(
     )
 
 
-def get_toys_config(**kwargs) -> dict:
+def get_toys_config(
+    sequence_data_path: Optional[str] = None,
+    semantic_mapping_path: Optional[str] = None,
+    purified_content_path: Optional[str] = None,
+    purified_collab_path: Optional[str] = None,
+    output_dir: Optional[str] = None,
+    checkpoint_dir: Optional[str] = None,
+    model_type: str = "t5-tiny-2",
+    **kwargs
+) -> dict:
     default_paths = {
         'sequence_data_path': "dataset/Amazon-Toys/processed/toys-tiger-sentenceT5base/Toys",
         'semantic_mapping_path': "scripts/output/prism_tokenizer/toys/3-256-32-ema-only-5-core-items/semantic_id_mappings.json",
         'purified_content_path': None, 'purified_collab_path': None,
     }
-    return _create_dataset_config(dataset_name="toys", default_paths=default_paths, **kwargs)
+    return _create_dataset_config(
+        dataset_name="toys", sequence_data_path=sequence_data_path,
+        semantic_mapping_path=semantic_mapping_path,
+        output_dir=output_dir, checkpoint_dir=checkpoint_dir,
+        model_type=model_type, default_paths=default_paths,
+        purified_content_path=purified_content_path,
+        purified_collab_path=purified_collab_path,
+        **kwargs
+    )
 
 
-def get_cds_config(**kwargs) -> dict:
+def get_cds_config(
+    sequence_data_path: Optional[str] = None,
+    semantic_mapping_path: Optional[str] = None,
+    purified_content_path: Optional[str] = None,
+    purified_collab_path: Optional[str] = None,
+    output_dir: Optional[str] = None,
+    checkpoint_dir: Optional[str] = None,
+    model_type: str = "t5-tiny-2",
+    **kwargs
+) -> dict:
     default_paths = {
         'sequence_data_path': "dataset/Amazon-CDs/processed/cds-tiger-sentenceT5base/CDs",
         'semantic_mapping_path': "scripts/output/prism_tokenizer/cds/3-256-32-ema-only-5-core-items/semantic_id_mappings.json",
         'purified_content_path': None, 'purified_collab_path': None,
     }
-    return _create_dataset_config(dataset_name="cds", default_paths=default_paths, **kwargs)
+    return _create_dataset_config(
+        dataset_name="cds", sequence_data_path=sequence_data_path,
+        semantic_mapping_path=semantic_mapping_path,
+        output_dir=output_dir, checkpoint_dir=checkpoint_dir,
+        model_type=model_type, default_paths=default_paths,
+        purified_content_path=purified_content_path,
+        purified_collab_path=purified_collab_path,
+        **kwargs
+    )
 
 
 CONFIG_REGISTRY = {
