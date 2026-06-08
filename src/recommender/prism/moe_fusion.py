@@ -211,10 +211,7 @@ class MoEFusion(nn.Module):
             self.fusion_alpha = nn.Parameter(torch.tensor(-2.0))
 
         self.dropout = nn.Dropout(dropout)
-        tag_parts = ["Dense Softmax"]
-        if use_teacher_gate:
-            tag_parts.append("+TeacherGate")
-        tag = " ".join(tag_parts)
+        tag = "Dense Softmax" if router_type == "dense" else f"Sparse Top-{top_k}"
         logger.info(f"MoE Fusion [{tag}]: {num_experts} experts, hidden={expert_hidden_dim}, concat={concat_dim}D")
 
     def forward(
