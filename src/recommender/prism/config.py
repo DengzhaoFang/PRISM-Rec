@@ -135,12 +135,6 @@ class TrainingConfig:
     # Trie-Constrained Decoding
     use_trie_constraints: bool = False
 
-    # TCAF: Teacher-Conditioned Adaptive Fusion
-    use_teacher_gate: bool = False
-    lambda_align: float = 0.0
-    teacher_dim: int = 832
-    teacher_path: Optional[str] = None
-
     # Adaptive Temperature Scaling
     use_adaptive_temperature: bool = False
     tau_alpha: float = 0.5

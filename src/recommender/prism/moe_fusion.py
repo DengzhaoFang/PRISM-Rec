@@ -80,84 +80,6 @@ class DenseRouter(nn.Module):
         return weights
 
 
-class TeacherConditionedRouter(nn.Module):
-    """
-    Item-level teacher-conditioned modality router.
-
-    Uses the stage1 teacher prototype (which encodes "what recommendation
-    context this item belongs to") to produce item-specific modality weights.
-    This enables head/tail-aware routing: items with rich collaborative context
-    naturally get different modality emphasis than cold-start items.
-
-    Architecture:
-      teacher_proj:  teacher_dim → gate_hidden
-      gate:          [concat_modalities, teacher_proj] → softmax weights
-      modality_temp: learnable per-modality temperature
-    """
-
-    def __init__(self, input_dim: int, teacher_dim: int = 832,
-                 num_experts: int = 3, dropout: float = 0.1,
-                 entropy_reg_weight: float = 0.05):
-        super().__init__()
-        self.num_experts = num_experts
-        self.entropy_reg_weight = entropy_reg_weight
-
-        # Teacher → routing context
-        gate_hidden = 128
-        self.teacher_proj = nn.Sequential(
-            nn.Linear(teacher_dim, gate_hidden),
-            nn.LayerNorm(gate_hidden),
-            nn.GELU(),
-        )
-
-        # Gate: [modality_concat + teacher_context] → expert weights
-        gate_input_dim = input_dim + gate_hidden
-        hd = max(gate_input_dim // 2, 128)
-        self.gate = nn.Sequential(
-            nn.Linear(gate_input_dim, hd), nn.LayerNorm(hd), nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hd, hd // 2), nn.ReLU(),
-            nn.Linear(hd // 2, num_experts),
-        )
-        # Learnable per-modality temperature (initialised to 1, sharpens adaptively)
-        self.modality_temp = nn.Parameter(torch.ones(num_experts))
-
-        for m in self.gate.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.xavier_uniform_(m.weight, gain=0.5)
-                nn.init.zeros_(m.bias)
-
-    def forward(self, x: torch.Tensor, teacher: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            x: (B, L, input_dim) — concat of [id_emb, content_proj, collab_proj]
-            teacher: (B, teacher_dim) — stage1 teacher prototype
-        Returns:
-            weights: (B, L, num_experts) — softmax modality weights
-        """
-        B, L, _ = x.shape
-
-        t_proj = self.teacher_proj(teacher)           # (B, gate_hidden)
-        t_proj = t_proj.unsqueeze(1).expand(B, L, -1)  # (B, L, gate_hidden)
-
-        gate_input = torch.cat([x, t_proj], dim=-1)    # (B, L, input_dim + gate_hidden)
-        logits = self.gate(gate_input)
-
-        # Temperature-scaled softmax (temp always positive via abs)
-        weights = F.softmax(logits / self.modality_temp.abs().clamp(min=0.1), dim=-1)
-
-        # Entropy regularization
-        if self.training and self.entropy_reg_weight > 0:
-            avg_w = weights.mean(dim=(0, 1))
-            entropy = -(avg_w * (avg_w + 1e-8).log()).sum()
-            max_ent = torch.log(torch.tensor(float(self.num_experts), device=x.device))
-            self._entropy_penalty = (max_ent - entropy) / (max_ent + 1e-8) * self.entropy_reg_weight
-        else:
-            self._entropy_penalty = torch.tensor(0.0, device=x.device)
-
-        return weights
-
-
 class Router(nn.Module):
     def __init__(self, input_dim, num_experts, top_k=2, use_load_balancing=True,
                  load_balance_weight=0.001, noise_std=0.05, use_noisy_gating=True):
@@ -238,15 +160,12 @@ class MoEFusion(nn.Module):
         dropout: float = 0.1,
         use_residual: bool = True,
         router_type: str = "sparse",
-        use_teacher_gate: bool = False,
-        teacher_dim: int = 832,
     ):
         super().__init__()
         self.d_model = d_model
         self.use_residual = use_residual
         self.router_type = router_type
         self.num_experts = num_experts
-        self.use_teacher_gate = use_teacher_gate
 
         self.content_proj = nn.Linear(purified_dim, d_model)
         self.collab_proj = nn.Linear(purified_dim, d_model)
@@ -280,22 +199,13 @@ class MoEFusion(nn.Module):
         self.output_norm = nn.LayerNorm(d_model)
 
         if router_type == "dense":
-            if use_teacher_gate:
-                self.tc_router = TeacherConditionedRouter(
-                    concat_dim, teacher_dim=teacher_dim,
-                    num_experts=num_experts, dropout=dropout,
-                    entropy_reg_weight=0.05)
-                self.dense_router = None
-            else:
-                self.dense_router = DenseRouter(concat_dim, num_experts, dropout,
-                                                entropy_reg_weight=0.0)
-                self.tc_router = None
+            self.dense_router = DenseRouter(concat_dim, num_experts, dropout,
+                                            entropy_reg_weight=0.0)
             self.router = None
         else:
             self.router = Router(concat_dim, num_experts, top_k, use_load_balancing,
                                  load_balance_weight, noise_std=0.05, use_noisy_gating=True)
             self.dense_router = None
-            self.tc_router = None
 
         if use_residual:
             self.fusion_alpha = nn.Parameter(torch.tensor(-2.0))
@@ -314,19 +224,18 @@ class MoEFusion(nn.Module):
         purified_collab: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         return_stats: bool = False,
-        teacher: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> Tuple[torch.Tensor, Optional[Dict]]:
         codebook_emb = kwargs.pop('codebook_emb', None)
         if self.router_type == "dense":
             return self._dense_forward(id_emb, purified_content, purified_collab,
-                                       attention_mask, return_stats, teacher=teacher,
+                                       attention_mask, return_stats,
                                        codebook_emb=codebook_emb)
         return self._sparse_forward(id_emb, purified_content, purified_collab,
                                      attention_mask, return_stats, codebook_emb=codebook_emb)
 
     def _dense_forward(self, id_emb, purified_content, purified_collab,
-                        attention_mask, return_stats, teacher=None, codebook_emb=None):
+                        attention_mask, return_stats, codebook_emb=None):
         B, seq_len, _ = id_emb.shape
 
         content_proj = self.content_norm(self.content_proj(purified_content))
@@ -338,15 +247,11 @@ class MoEFusion(nn.Module):
             concat_parts.append(torch.zeros(B, seq_len, self.d_model, device=id_emb.device))
         concat = torch.cat(concat_parts, dim=-1)
 
-        # Routing: teacher-conditioned (item-specific) or universal
-        if self.tc_router is not None and teacher is not None:
-            weights = self.tc_router(concat, teacher)
-            ent_penalty = self.tc_router._entropy_penalty
-        elif self.dense_router is not None:
+        # Routing
+        if self.dense_router is not None:
             weights = self.dense_router(concat)
             ent_penalty = self.dense_router._entropy_penalty
         else:
-            # Teacher gate enabled but teacher not provided — use uniform weights
             weights = torch.ones(B, seq_len, self.num_experts, device=id_emb.device) / self.num_experts
             ent_penalty = torch.tensor(0.0, device=id_emb.device)
 

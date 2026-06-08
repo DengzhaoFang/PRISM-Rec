@@ -260,8 +260,6 @@ class TIGER(nn.Module):
                 use_load_balancing = getattr(training_config, 'moe_use_load_balancing', False)
                 load_balance_weight = getattr(training_config, 'moe_load_balance_weight', 0.001)
                 router_type = "dense" if fusion_gate_type == "dense" else "sparse"
-                use_teacher_gate = getattr(training_config, 'use_teacher_gate', False)
-                teacher_dim = getattr(training_config, 'teacher_dim', 832)
 
                 self.fusion_module = MoEFusion(
                     d_model=model_config.d_model,
@@ -274,12 +272,8 @@ class TIGER(nn.Module):
                     dropout=model_config.dropout_rate,
                     use_residual=True,
                     router_type=router_type,
-                    use_teacher_gate=use_teacher_gate,
-                    teacher_dim=teacher_dim,
                 )
                 tag = "Dense Softmax" if router_type == "dense" else f"Sparse Top-{top_k}"
-                if use_teacher_gate:
-                    tag += " +TeacherGate"
                 logger.info(f"DSI MoE [{tag}]: {num_experts} experts, hidden={expert_hidden_dim}")
             else:
                 fixed_weights = None
@@ -306,20 +300,6 @@ class TIGER(nn.Module):
             )
             self.pos_emb_scale = nn.Parameter(torch.tensor(0.1))
             logger.info(f"Item/layer embeddings enabled")
-
-        # Teacher alignment: carry stage1 recommendation signal into stage2
-        self.lambda_align = getattr(training_config, 'lambda_align', 0.0)
-        self.use_teacher = (use_teacher_gate if 'use_teacher_gate' in dir() else False) or self.lambda_align > 0
-        if self.use_teacher:
-            teacher_dim = getattr(training_config, 'teacher_dim', 832)
-            self.teacher_to_model = nn.Sequential(
-                nn.Linear(teacher_dim, model_config.d_model),
-                nn.LayerNorm(model_config.d_model),
-                nn.GELU(),
-            )
-            if self.lambda_align > 0:
-                self.teacher_align_proj = nn.Linear(model_config.d_model, model_config.d_model)
-            logger.info(f"Teacher alignment: lambda_align={self.lambda_align}, teacher_dim={teacher_dim}")
 
         self._init_purified_predictor(training_config)
 
@@ -376,7 +356,6 @@ class TIGER(nn.Module):
         codebook_zq: Optional[torch.Tensor] = None,
         target_z_clean: Optional[torch.Tensor] = None,
         item_ids: Optional[List[int]] = None,
-        teacher: Optional[torch.Tensor] = None,
         return_dict: bool = False
     ) -> Dict[str, torch.Tensor]:
         id_emb = self.model.get_input_embeddings()(input_ids)
@@ -398,7 +377,7 @@ class TIGER(nn.Module):
                 fused_emb, fusion_stats = self.fusion_module(
                     id_emb, content_bc, collab_bc,
                     attention_mask=attention_mask, return_stats=True,
-                    teacher=teacher, codebook_emb=codebook_bc,
+                    codebook_emb=codebook_bc,
                 )
             else:
                 fused_emb = self.fusion_module(id_emb, content_bc, collab_bc)
@@ -436,24 +415,9 @@ class TIGER(nn.Module):
                 if ent_pen is not None:
                     total_loss = total_loss + ent_pen
 
-        # Teacher alignment loss: keep stage2 fused representation aligned with stage1 teacher
-        teacher_align_loss = None
-        if (self.lambda_align > 0 and teacher is not None
-                and hasattr(self, 'teacher_align_proj') and fusion_stats is not None):
-            num_ct = self.model_config.num_code_layers
-            item_repr = fused_emb[:, -num_ct:, :].mean(dim=1)  # (B, d_model)
-            item_aligned = self.teacher_align_proj(item_repr)
-            teacher_aligned = self.teacher_to_model(teacher)
-            teacher_align_loss = 1.0 - F.cosine_similarity(
-                item_aligned, teacher_aligned.detach(), dim=-1
-            ).mean()
-            total_loss = total_loss + self.lambda_align * teacher_align_loss
-
         result = {'loss': total_loss, 'logits': outputs.logits, 'main_loss': main_loss}
         if pred_loss is not None:
             result['pred_loss'] = pred_loss.item()
-        if teacher_align_loss is not None:
-            result['teacher_align_loss'] = teacher_align_loss.item()
         if fusion_stats is not None:
             result['fusion_stats'] = fusion_stats
             if 'load_balance_loss' in fusion_stats and fusion_stats['load_balance_loss'] is not None:

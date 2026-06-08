@@ -172,7 +172,6 @@ class Trainer:
             purified_content = None
             purified_collab = None
             target_z_clean = None
-            teacher = None
             if use_multimodal and 'history_purified_content' in batch:
                 purified_content = batch['history_purified_content'].to(self.device)
                 purified_collab = batch['history_purified_collab'].to(self.device)
@@ -181,8 +180,6 @@ class Trainer:
                 codebook_zq = batch['history_codebook_zq'].to(self.device)
             if use_predictor and 'target_z_clean' in batch:
                 target_z_clean = batch['target_z_clean'].to(self.device)
-            if 'target_teacher' in batch:
-                teacher = batch['target_teacher'].to(self.device)
 
             self.optimizer.zero_grad()
 
@@ -190,7 +187,7 @@ class Trainer:
                 input_ids=input_ids, attention_mask=attention_mask, labels=labels,
                 purified_content=purified_content, purified_collab=purified_collab,
                 codebook_zq=codebook_zq, target_z_clean=target_z_clean,
-                item_ids=item_ids, teacher=teacher, return_dict=True
+                item_ids=item_ids, return_dict=True
             )
 
             if isinstance(output, dict):
@@ -198,13 +195,11 @@ class Trainer:
                 main_loss = output.get('main_loss', loss)
                 pred_loss = output.get('pred_loss', None)
                 moe_lb_loss = output.get('moe_load_balance_loss', 0.0)
-                teacher_align_loss = output.get('teacher_align_loss', None)
             else:
                 loss, _ = output
                 main_loss = loss
                 pred_loss = None
                 moe_lb_loss = 0.0
-                teacher_align_loss = None
 
             loss.backward()
 
@@ -265,8 +260,6 @@ class Trainer:
                     ent_pen = output.get('moe_entropy_penalty')
                     if ent_pen is not None and ent_pen > 0:
                         logger.info(f"  Entropy penalty: {ent_pen:.6f}")
-                    if teacher_align_loss is not None and teacher_align_loss > 0:
-                        logger.info(f"  Teacher align loss: {teacher_align_loss:.6f}")
 
         metrics = {'total_loss': total_loss / num_batches, 'main_loss': total_main_loss / num_batches}
         if total_pred_loss > 0:

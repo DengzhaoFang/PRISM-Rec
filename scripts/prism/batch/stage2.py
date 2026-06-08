@@ -46,9 +46,6 @@ DATASET_MAP = {
 # Override via CLI: --experiments exp1,exp2,exp3
 TARGET_STAGE1_EXPERIMENTS = []
 
-# TCAF ablation (disabled — use clean DenseRouter MoE for now)
-TCAF_ABLATION = []
-
 # Sparse MoE ablation: test (num_experts, top_k) combinations
 # against the dense MoE baseline.  Each entry: (name, stage1_variant, extra_rec_args).
 # stage1_variant=None means "use the first auto-discovered stage1 experiment".
@@ -527,33 +524,6 @@ class RecBatchRunner:
 
             self.experiments.append(exp)
 
-        # TCAF ablation experiments
-        for tcaf_name, stage1_variant, extra_args in TCAF_ABLATION:
-            d = stage1_dirs.get(stage1_variant)
-            if d is None:
-                print(f"  [skip] tcaf/{tcaf_name}: stage1 variant '{stage1_variant}' not found")
-                continue
-
-            semantic_map = d / "semantic_id_mappings.json"
-            purified_content = d / "item_purified_content.npy"
-            purified_collab = d / "item_purified_collab.npy"
-
-            if not semantic_map.exists():
-                print(f"  [skip] tcaf/{tcaf_name}: missing semantic_id_mappings.json")
-                continue
-
-            output_dir = self.output_base / tcaf_name
-            exp = RecExperiment(
-                name=tcaf_name,
-                stage1_dir=d,
-                output_dir=output_dir,
-                semantic_map=semantic_map,
-                purified_content=purified_content,
-                purified_collab=purified_collab,
-                purified_dim=128,
-                log_path=output_dir / "training.log",
-                extra_rec_args=extra_args,
-            )
 
             if (output_dir / "best_model.pt").exists():
                 exp.status = "skipped"
@@ -617,18 +587,6 @@ class RecBatchRunner:
         env["CUDA_VISIBLE_DEVICES"] = str(gpu)
         env["TQDM_DISABLE"] = "1"
 
-        # Auto-discover teacher_path from stage1 output or data directory
-        teacher_path = exp.stage1_dir.parent / ".." / ".." / ".." / "dataset"
-        # Resolve: hparam_stage1/<exp>/ -> hparam_stage1 -> prism_tokenizer -> output -> scripts -> PROJECT_ROOT
-        data_teacher = self.project_root / "dataset" / DATASET_MAP[self.dataset] / "teacher_prototypes.npy"
-        stage1_teacher = exp.stage1_dir / ".." / "teacher_prototypes.npy"
-        if data_teacher.exists():
-            resolved_teacher = str(data_teacher)
-        elif stage1_teacher.exists():
-            resolved_teacher = str(stage1_teacher.resolve())
-        else:
-            resolved_teacher = ""
-
         cmd = [
             sys.executable, "-m", REC_TRAIN_MODULE,
             "--config", self.dataset,
@@ -637,7 +595,6 @@ class RecBatchRunner:
             "--purified_content_path", str(exp.purified_content),
             "--purified_collab_path", str(exp.purified_collab),
             "--purified_dim", str(exp.purified_dim),
-            "--teacher_path", resolved_teacher,
             *BASE_REC_ARGS,
             *exp.extra_rec_args,
         ]

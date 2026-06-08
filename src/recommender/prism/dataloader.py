@@ -76,12 +76,6 @@ def collate_fn(batch: List[Dict], pad_token_id: int = 0, use_dynamic_batching: b
     if 'target_item_id' in batch[0]:
         result['target_item_id'] = [item['target_item_id'] for item in batch]
 
-    # Teacher prototypes for TCAF
-    if 'target_teacher' in batch[0]:
-        result['target_teacher'] = torch.stack([
-            torch.from_numpy(item['target_teacher']) for item in batch
-        ])
-
     return result
 
 

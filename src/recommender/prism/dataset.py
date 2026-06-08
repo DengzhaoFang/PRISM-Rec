@@ -271,7 +271,6 @@ class GenRecDataset(Dataset):
         purified_codebook: Optional[Dict[int, np.ndarray]] = None,
         use_multimodal: bool = False,
         sample_limit: Optional[int] = None,
-        teacher_dict: Optional[Dict[int, np.ndarray]] = None,
     ):
         self.sequence_file = sequence_file
         self.semantic_mapper = semantic_mapper
@@ -283,7 +282,6 @@ class GenRecDataset(Dataset):
         self.purified_z_clean = purified_z_clean or {}
         self.purified_codebook = purified_codebook or {}
         self.use_multimodal = use_multimodal
-        self.teacher = teacher_dict or {}
         self.codebook_dim = 32
 
         self.purified_dim = 128
@@ -372,13 +370,6 @@ class GenRecDataset(Dataset):
                 target_z_clean = self.purified_z_clean[target_item_id]
             result['target_z_clean'] = target_z_clean
 
-        # Teacher prototype for TCAF (item-level recommendation signal from stage1)
-        if self.teacher and target_item_id in self.teacher:
-            result['target_teacher'] = self.teacher[target_item_id]
-        elif self.teacher:
-            result['target_teacher'] = np.zeros(
-                next(iter(self.teacher.values())).shape[0], dtype=np.float32)
-
         return result
 
     def get_stats(self) -> Dict:
@@ -390,21 +381,6 @@ class GenRecDataset(Dataset):
             'sequence_length': self.max_len * self.semantic_mapper.num_layers,
             'vocab_size': self.semantic_mapper.get_vocab_size()
         }
-
-
-def load_teacher_dict(teacher_path: str, item_ids_path: str) -> Dict[int, np.ndarray]:
-    """Load teacher prototypes as item_id → vector dict for TCAF."""
-    if not teacher_path or not os.path.exists(teacher_path):
-        return {}
-    teacher_arr = np.load(teacher_path)  # (n_items, teacher_dim)
-    if os.path.exists(item_ids_path):
-        item_ids = np.load(item_ids_path)
-    else:
-        item_ids = np.arange(len(teacher_arr))
-    teacher_dict = {int(item_ids[i]): teacher_arr[i].astype(np.float32)
-                    for i in range(len(item_ids))}
-    logger.info(f"Loaded teacher prototypes: {len(teacher_dict)} items, dim={teacher_arr.shape[1]}")
-    return teacher_dict
 
 
 def create_datasets(
@@ -422,7 +398,6 @@ def create_datasets(
     train_sample_limit: Optional[int] = None,
     valid_sample_limit: Optional[int] = None,
     test_sample_limit: Optional[int] = None,
-    teacher_path: Optional[str] = None,
 ) -> Tuple[GenRecDataset, GenRecDataset, GenRecDataset, SemanticIDMapper]:
     """Create train, validation, and test datasets."""
 
@@ -435,18 +410,12 @@ def create_datasets(
     purified_content_dict = {}
     purified_collab_dict = {}
     purified_z_clean_dict = {}
+    purified_codebook_dict = {}
     if use_multimodal and purified_content_path and purified_collab_path:
         logger.info("Loading Stage 1 purified features for DSI fusion...")
         purified_content_dict, purified_collab_dict, purified_z_clean_dict, purified_codebook_dict = load_purified_embeddings(
             purified_content_path, purified_collab_path
         )
-
-    # Teacher prototypes for TCAF
-    teacher_dict = {}
-    if teacher_path:
-        ids_path = os.path.join(os.path.dirname(purified_content_path or ''),
-                                'item_purified_ids.npy')
-        teacher_dict = load_teacher_dict(teacher_path, ids_path)
 
     if semantic_mapper.num_layers != num_layers:
         logger.warning(f"num_layers auto-adjusted: {num_layers} -> {semantic_mapper.num_layers}")
@@ -464,7 +433,6 @@ def create_datasets(
         purified_z_clean=purified_z_clean_dict,
         purified_codebook=purified_codebook_dict,
         use_multimodal=use_multimodal,
-        teacher_dict=teacher_dict,
     )
 
     train_dataset = GenRecDataset(
