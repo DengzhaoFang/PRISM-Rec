@@ -56,7 +56,8 @@ plt.rcParams.update({
 })
 
 # Okabe-Ito colorblind-friendly palette (KDD/NeurIPS standard)
-LAYER_COLORS = ['#009E73', '#D55E00', '#0072B2']  # Teal, Vermillion, Blue
+_BASE_COLORS = ['#009E73', '#D55E00', '#0072B2', '#CC79A7', '#F0E442', '#56B4E9']
+LAYER_COLORS = _BASE_COLORS  # extended on demand in plot_comparison
 
 
 def load_codebooks_from_checkpoint(checkpoint_path: str) -> List[np.ndarray]:
@@ -163,7 +164,10 @@ def plot_comparison(
     prism_2d, prism_labels = prepare_tsne_data(prism_codebooks, perplexity, n_iter, init)
     
     n_layers = len(tiger_codebooks)
-    
+    colors = _BASE_COLORS
+    if n_layers > len(colors):
+        colors = [_BASE_COLORS[i % len(_BASE_COLORS)] for i in range(n_layers)]
+
     # Create figure with GridSpec for precise layout control
     # Reduced figure size for better paper integration while maintaining clarity
     fig = plt.figure(figsize=(4.5, 2.2), dpi=dpi)
@@ -182,7 +186,7 @@ def plot_comparison(
     # Create legend elements with circles (matching scatter points)
     from matplotlib.lines import Line2D
     legend_elements = [
-        Line2D([0], [0], marker='o', color='w', markerfacecolor=LAYER_COLORS[i],
+        Line2D([0], [0], marker='o', color='w', markerfacecolor=colors[i],
                markersize=8, label=f'Layer {i}', markeredgecolor='white', markeredgewidth=0.5)
         for i in range(n_layers)
     ]
@@ -206,12 +210,12 @@ def plot_comparison(
     def plot_scatter(ax, embeddings_2d, layer_labels, title):
         ax.set_facecolor('white')
         
-        colors = [LAYER_COLORS[int(label)] for label in layer_labels]
+        point_colors = [colors[int(label)] for label in layer_labels]
         
         ax.scatter(
             embeddings_2d[:, 0],
             embeddings_2d[:, 1],
-            c=colors,
+            c=point_colors,
             alpha=0.7,
             s=12,
             edgecolors='white',
