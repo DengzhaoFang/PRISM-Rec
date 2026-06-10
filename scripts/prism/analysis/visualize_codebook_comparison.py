@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-TIGER vs PRISM Codebook t-SNE Comparison Visualization
+TIGER vs ADSA Codebook t-SNE Comparison Visualization
 
-This script generates a publication-quality figure comparing TIGER and PRISM
+This script generates a publication-quality figure comparing TIGER and ADSA
 codebook embeddings side by side with a shared legend.
 
 Output format: PNG, PDF, SVG (for direct LaTeX insertion)
@@ -146,15 +146,15 @@ def plot_comparison(
     dpi: int = 300
 ):
     """
-    Plot TIGER and PRISM codebook comparison in publication-quality format.
+    Plot TIGER and ADSA codebook comparison in publication-quality format.
     
-    Layout: Legend on top, TIGER (left) and PRISM (right) below.
+    Layout: Legend on top, TIGER (left) and ADSA (right) below.
     Style: Clean, borderless scatter plots (NeurIPS/KDD standard)
     """
     print("\nComputing t-SNE for TIGER...")
     tiger_2d, tiger_labels = prepare_tsne_data(tiger_codebooks, perplexity, n_iter, init)
     
-    print("Computing t-SNE for PRISM...")
+    print("Computing t-SNE for ADSA...")
     prism_2d, prism_labels = prepare_tsne_data(prism_codebooks, perplexity, n_iter, init)
     
     n_layers = len(tiger_codebooks)
@@ -164,7 +164,7 @@ def plot_comparison(
     fig = plt.figure(figsize=(4.5, 2.2), dpi=dpi)
     fig.patch.set_facecolor('white')
     
-    # GridSpec: 2 rows (legend + plots), 2 columns (TIGER + PRISM)
+    # GridSpec: 2 rows (legend + plots), 2 columns (TIGER + ADSA)
     # Adjusted height_ratios and hspace for more compact layout
     from matplotlib.gridspec import GridSpec
     gs = GridSpec(2, 2, figure=fig, height_ratios=[0.08, 1], 
@@ -193,7 +193,7 @@ def plot_comparison(
         bbox_to_anchor=(0.5, 0.05)  # Move legend down slightly
     )
     
-    # Bottom row: TIGER (left) and PRISM (right)
+    # Bottom row: TIGER (left) and ADSA (right)
     ax_tiger = fig.add_subplot(gs[1, 0])
     ax_prism = fig.add_subplot(gs[1, 1])
     
@@ -237,7 +237,7 @@ def plot_comparison(
     
     # Plot both
     plot_scatter(ax_tiger, tiger_2d, tiger_labels, 'TIGER Codebook')
-    plot_scatter(ax_prism, prism_2d, prism_labels, 'PRISM Codebook')
+    plot_scatter(ax_prism, prism_2d, prism_labels, 'ADSA Codebook')
     
     # Tight layout with minimal padding to eliminate white borders
     plt.tight_layout(pad=0.1)
@@ -265,12 +265,12 @@ def plot_comparison(
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Generate TIGER vs PRISM codebook comparison visualization'
+        description='Generate TIGER vs ADSA codebook comparison visualization'
     )
     parser.add_argument('--tiger_model', type=str, required=True,
                         help='Path to TIGER model checkpoint')
     parser.add_argument('--prism_model', type=str, required=True,
-                        help='Path to PRISM model checkpoint')
+                        help='Path to ADSA model checkpoint')
     parser.add_argument('--output_path', type=str, required=True,
                         help='Output path (without extension, will save .png/.pdf/.svg)')
     parser.add_argument('--perplexity', type=int, default=60,
@@ -290,14 +290,14 @@ def main():
         os.makedirs(output_dir, exist_ok=True)
     
     print("=" * 60)
-    print("TIGER vs PRISM Codebook Comparison")
+    print("TIGER vs ADSA Codebook Comparison")
     print("=" * 60)
     
     # Load codebooks
     print("\nLoading TIGER codebooks...")
     tiger_codebooks = load_codebooks_from_checkpoint(args.tiger_model)
     
-    print("\nLoading PRISM codebooks...")
+    print("\nLoading ADSA codebooks...")
     prism_codebooks = load_codebooks_from_checkpoint(args.prism_model)
     
     # Generate comparison plot

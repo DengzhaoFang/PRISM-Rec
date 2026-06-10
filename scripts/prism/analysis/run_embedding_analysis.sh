@@ -1,18 +1,18 @@
 #!/bin/bash
 
-# TIGER vs PRISM Embedding Comparison Visualization Script
+# TIGER vs ADSA Embedding Comparison Visualization Script
 #
-# This script generates a publication-quality figure comparing TIGER and PRISM
+# This script generates a publication-quality figure comparing TIGER and ADSA
 # recommendation embeddings side by side with a shared legend (2 rows for 10 categories).
 
 # Get script directory and project root
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 
 cd "$PROJECT_ROOT"
 
 echo "=================================================="
-echo "Embedding Quality Analysis: PRISM vs TIGER"
+echo "Embedding Quality Analysis: ADSA vs TIGER"
 echo "=================================================="
 echo ""
 
@@ -24,11 +24,11 @@ echo ""
 DATASET="beauty"
 
 # Model checkpoints
-PRISM_CHECKPOINT="scripts/output/recommender/prism/beauty/2026-01-06-21-58-26_3layer-prism/best_model.pt"
+PRISM_CHECKPOINT="scripts/output/recommender/prism/beauty/hparam_stage2_PASCL/pa_scl_text_dominant/best_model.pt"
 TIGER_CHECKPOINT="scripts/output/recommender/tiger/beauty/2026-01-06-22-02-28_3layer-tiger/best_model.pt"
 
 # Output directory
-OUTPUT_DIR="scripts/prism/embedding_analysis_${DATASET}"
+OUTPUT_DIR="prism/embedding_analysis_${DATASET}"
 
 # Device
 DEVICE="cuda:3"
@@ -45,7 +45,7 @@ VIS_METHOD="tsne"
 
 echo "Configuration:"
 echo "  Dataset: ${DATASET}"
-echo "  PRISM checkpoint: ${PRISM_CHECKPOINT}"
+echo "  ADSA checkpoint: ${PRISM_CHECKPOINT}"
 echo "  TIGER checkpoint: ${TIGER_CHECKPOINT}"
 echo "  Output directory: ${OUTPUT_DIR}"
 echo "  Device: ${DEVICE}"
@@ -55,7 +55,7 @@ echo ""
 echo "=================================================="
 echo ""
 
-python scripts/prism/analyze_embedding_geometry.py \
+python scripts/prism/analysis/analyze_embedding_geometry.py \
     --prism_checkpoint "${PRISM_CHECKPOINT}" \
     --tiger_checkpoint "${TIGER_CHECKPOINT}" \
     --dataset "${DATASET}" \
@@ -77,5 +77,5 @@ echo "  - ${OUTPUT_DIR}/metrics.json (quantitative metrics)"
 echo ""
 echo "Layout:"
 echo "  ✓ Legend on top (2 rows, 5 categories each)"
-echo "  ✓ TIGER Recommendation (left) | PRISM Recommendation (right)"
+echo "  ✓ TIGER Recommendation (left) | ADSA Recommendation (right)"
 echo "=================================================="

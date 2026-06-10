@@ -155,8 +155,11 @@ class EmbeddingAnalyzer:
         filtered_state_dict = {}
         skipped_keys = []
         
+        model_state = model.state_dict()
         for key, value in state_dict.items():
             if 'codebook_predictor' in key or 'tag_predictor' in key:
+                skipped_keys.append(key)
+            elif key in model_state and value.shape != model_state[key].shape:
                 skipped_keys.append(key)
             else:
                 filtered_state_dict[key] = value
@@ -221,8 +224,11 @@ class EmbeddingAnalyzer:
         filtered_state_dict = {}
         skipped_keys = []
         
+        model_state = model.state_dict()
         for key, value in state_dict.items():
             if 'codebook_predictor' in key or 'tag_predictor' in key:
+                skipped_keys.append(key)
+            elif key in model_state and value.shape != model_state[key].shape:
                 skipped_keys.append(key)
             else:
                 filtered_state_dict[key] = value
@@ -718,7 +724,7 @@ class EmbeddingAnalyzer:
         
         # Plot both
         plot_scatter(ax_tiger, tiger_2d, labels, 'TIGER Recommendation')
-        plot_scatter(ax_prism, prism_2d, labels, 'PRISM Recommendation')
+        plot_scatter(ax_prism, prism_2d, labels, 'ADSA Recommendation')
         
         # Tight layout with minimal padding to eliminate white borders
         plt.tight_layout(pad=0.1)
