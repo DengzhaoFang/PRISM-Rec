@@ -93,6 +93,17 @@ def load_content_embeddings(data_dir: str) -> Dict[int, np.ndarray]:
     return content_dict
 
 
+def load_codebook_mappings(codebook_dir: str) -> Tuple[Dict[int, np.ndarray], int]:
+    """Load codebook z_q embeddings from Stage 1 output directory."""
+    zq_path = os.path.join(codebook_dir, 'item_codebook_zq.npy')
+    ids_path = os.path.join(codebook_dir, 'item_purified_ids.npy')
+    if os.path.exists(zq_path) and os.path.exists(ids_path):
+        zq_arr = np.load(zq_path)
+        item_ids = np.load(ids_path)
+        return {int(item_ids[i]): zq_arr[i].astype(np.float32) for i in range(len(item_ids))}, zq_arr.shape[1]
+    return {}, 0
+
+
 def load_collab_embeddings(file_path: str) -> Dict[int, np.ndarray]:
     """Load raw collaborative embeddings (64D) from .npy file."""
     if not os.path.exists(file_path):
