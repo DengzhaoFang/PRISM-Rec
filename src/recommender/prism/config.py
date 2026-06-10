@@ -67,6 +67,7 @@ class DataConfig:
     semantic_mapping_path: str
     purified_content_path: Optional[str] = None   # h_t_hat (128D)
     purified_collab_path: Optional[str] = None     # h_c_hat (128D)
+    collab_embedding_path: Optional[str] = None    # LightGCN collab embeddings
     max_seq_length: int = 20
 
     def __post_init__(self):
@@ -166,11 +167,13 @@ def _create_dataset_config(
     checkpoint_dir = checkpoint_dir or output_dir
     model_config = get_model_config(model_type)
 
+    collab_path = os.path.join(os.path.dirname(sequence_data_path), 'lightgcn', 'item_embeddings_collab.npy')
     data_config = DataConfig(
         dataset_name=dataset_name, sequence_data_path=sequence_data_path,
         semantic_mapping_path=semantic_mapping_path,
         purified_content_path=purified_content_path,
         purified_collab_path=purified_collab_path,
+        collab_embedding_path=collab_path,
         max_seq_length=20
     )
 
@@ -210,7 +213,7 @@ def get_beauty_config(
     model_type: str = "t5-tiny-2",
     **kwargs
 ) -> dict:
-    tokenizer_dir = "scripts/output/prism_tokenizer/beauty/3-256-32-ide+mcd+saco-cleancollab"
+    tokenizer_dir = "scripts/output/prism_tokenizer/beauty/hparam_stage1_PASCL/pa_scl_text_dominant"
     default_paths = {
         'sequence_data_path': "dataset/Amazon-Beauty/processed/beauty-tiger-sentenceT5base/Beauty",
         'semantic_mapping_path': f"{tokenizer_dir}/semantic_id_mappings.json",
