@@ -964,7 +964,10 @@ def main():
     # Load content and collab embeddings (shared between models)
     data_dir = prism_config['data'].sequence_data_path
     content_embs_dict = load_content_embeddings(data_dir)
-    collab_embs_dict = load_collab_embeddings(prism_config['data'].collab_embedding_path, data_dir)
+    collab_path = getattr(prism_config['data'], 'collab_embedding_path', None)
+    if not collab_path:
+        collab_path = os.path.join(os.path.dirname(data_dir), 'lightgcn', 'item_embeddings_collab.npy')
+    collab_embs_dict = load_collab_embeddings(collab_path, data_dir)
     
     # Load codebook embeddings (for improved projection mode)
     semantic_mapping_dir = Path(prism_config['data'].semantic_mapping_path).parent
