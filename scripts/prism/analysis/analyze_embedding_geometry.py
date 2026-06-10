@@ -966,7 +966,7 @@ def main():
     content_embs_dict = load_content_embeddings(data_dir)
     collab_path = getattr(prism_config['data'], 'collab_embedding_path', None)
     if not collab_path:
-        collab_path = os.path.join(os.path.dirname(data_dir), 'lightgcn', 'item_embeddings_collab.npy')
+        collab_path = os.path.join(data_dir, 'lightgcn', 'item_embeddings_collab.npy')
     collab_embs_dict = load_collab_embeddings(collab_path, data_dir)
     
     # Load codebook embeddings (for improved projection mode)

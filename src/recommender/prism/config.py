@@ -167,7 +167,7 @@ def _create_dataset_config(
     checkpoint_dir = checkpoint_dir or output_dir
     model_config = get_model_config(model_type)
 
-    collab_path = os.path.join(os.path.dirname(sequence_data_path), 'lightgcn', 'item_embeddings_collab.npy')
+    collab_path = os.path.join(sequence_data_path, 'lightgcn', 'item_embeddings_collab.npy')
     data_config = DataConfig(
         dataset_name=dataset_name, sequence_data_path=sequence_data_path,
         semantic_mapping_path=semantic_mapping_path,
