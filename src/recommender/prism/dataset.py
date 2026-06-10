@@ -104,8 +104,12 @@ def load_codebook_mappings(codebook_dir: str) -> Tuple[Dict[int, np.ndarray], in
     return {}, 0
 
 
-def load_collab_embeddings(file_path: str) -> Dict[int, np.ndarray]:
-    """Load raw collaborative embeddings (64D) from .npy file."""
+def load_collab_embeddings(file_path: str, data_dir: str = None) -> Dict[int, np.ndarray]:
+    """Load raw collaborative embeddings (64D) from .npy file.
+
+    For .npy files, item IDs are resolved from item_emb.parquet in data_dir.
+    For .npz files, item_ids are stored within the archive.
+    """
     if not os.path.exists(file_path):
         logger.warning(f"Collab embeddings not found at {file_path}")
         return {}
@@ -116,7 +120,16 @@ def load_collab_embeddings(file_path: str) -> Dict[int, np.ndarray]:
         embeddings = data['embeddings']
         collab_dict = {int(iid): embeddings[i].astype(np.float32) for i, iid in enumerate(item_ids)}
     else:
-        collab_dict = {i: embeddings[i].astype(np.float32) for i in range(len(embeddings))}
+        import pandas as pd
+        if data_dir:
+            parquet_path = os.path.join(data_dir, 'item_emb.parquet')
+            if os.path.exists(parquet_path):
+                item_ids = pd.read_parquet(parquet_path)['ItemID'].values
+            else:
+                item_ids = np.arange(len(embeddings))
+        else:
+            item_ids = np.arange(len(embeddings))
+        collab_dict = {int(iid): embeddings[i].astype(np.float32) for i, iid in enumerate(item_ids)}
     logger.info(f"Loaded raw collab embeddings: {len(collab_dict)} items, dim={embeddings.shape[1]}")
     return collab_dict
 
