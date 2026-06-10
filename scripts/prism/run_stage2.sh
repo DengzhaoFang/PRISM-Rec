@@ -11,17 +11,20 @@
 #   bash scripts/prism/run_stage2.sh beauty
 
 set -euo pipefail
-DATASET="${1:-beauty}"
+DATASET="${1:-cds}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 # ── Editable config ──────────────────────────────────────────────────────
-STAGE1_DIR="${STAGE1_DIR:-scripts/output/prism_tokenizer/beauty/hparam_stage1_PASCL_best}"
+STAGE1_DIR="${STAGE1_DIR:-scripts/output/prism_tokenizer/cds/hparam_stage1_PASCL}"
 STAGE1_EXPERIMENTS="${STAGE1_EXPERIMENTS:-}"
-STAGE2_OUTPUT="${STAGE2_OUTPUT:-hparam_stage2_PASCL_sparseMoe}"
+STAGE2_OUTPUT="${STAGE2_OUTPUT:-hparam_stage2_PASCL}"
+
 # Ablation mode: comment out for normal auto-discover, uncomment for sparse MoE
 # ABLATION="${ABLATION:-sparse_moe}"
-export ABLATION
+# export ABLATION
+
+
 FAST_DEV_CONFIG="${FAST_DEV_CONFIG:-}"
 GPUS="${GPUS:-}"
 # ──────────────────────────────────────────────────────────────────────────

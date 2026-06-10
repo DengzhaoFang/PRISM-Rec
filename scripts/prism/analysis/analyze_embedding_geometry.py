@@ -720,10 +720,10 @@ class EmbeddingAnalyzer:
             ax.axis('off')
             
             # Add title below the plot
-            ax.set_title(title, fontsize=7, fontweight='normal', pad=2, y=0)
+            ax.set_title(title, fontsize=7, fontweight='normal', pad=-2, y=0)
         
         # Plot both
-        plot_scatter(ax_tiger, tiger_2d, labels, 'TIGER Recommendation')
+        plot_scatter(ax_tiger, tiger_2d, labels, 'UNGER Recommendation')
         plot_scatter(ax_prism, prism_2d, labels, 'ADSA Recommendation')
         
         # Tight layout with minimal padding to eliminate white borders

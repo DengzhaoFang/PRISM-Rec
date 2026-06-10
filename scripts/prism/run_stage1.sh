@@ -8,7 +8,7 @@
 #   STAGE1_OUTPUT="hparam_stage1_v2" GPUS="0,1,2,3" bash scripts/prism/run_stage1.sh beauty
 
 set -euo pipefail
-DATASET="${1:-sports}"
+DATASET="${1:-cds}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 

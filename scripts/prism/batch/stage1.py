@@ -96,30 +96,6 @@ BASE_TRAIN_ARGS = [
     "--ide", "on", "--ide_dim", "128",
 ]
 
-# EXPERIMENT_GROUPS = [
-#     ("PA-SCL: Stage1 Ablation Study", [
-#         # PA-SCL replaces CMA (single decoder)
-#         ("pa_scl",
-#          ["--use_pa_scl"]),
-
-#         # PA-SCL + Dual-Head Decoder
-#         ("pa_scl_dual_head",
-#          ["--use_pa_scl",
-#           "--use_dual_head"]),
-
-#         # PA-SCL + Dual-Head (stronger graph prior)
-#         ("pa_scl_dual_head_higraph",
-#          ["--use_pa_scl",
-#           "--use_dual_head",
-#           "--graph_scale_beta", "0.10"]),
-
-#         # PA-SCL + Dual-Head (sharper text)
-#         ("pa_scl_dual_head_sharptext",
-#          ["--use_pa_scl",
-#           "--use_dual_head",
-#           "--text_sharpen_gamma", "5.0"]),
-#     ]),
-# ]
 
 EXPERIMENT_GROUPS = [
     ("PA-SCL: Core Ablation Study (4 Runs)", [
@@ -163,6 +139,84 @@ EXPERIMENT_GROUPS = [
           "--text_sharpen_gamma", "5.0"]),
     ]),
 ]
+
+
+# EXPERIMENT_GROUPS = [
+#     ("PA-SCL: Round 1 - Beta Ceiling & Text Pure Ablation", [
+        
+#         # 1. 继续压制图信号: Beta = 0.15 (需要 15% 的邻居重合才算满分)
+#         ("pa_scl_beta_0.15",
+#          ["--use_pa_scl", "--pa_scl_topk", "5", "--graph_scale_beta", "0.15"]),
+
+#         # 2. 严苛的图信号: Beta = 0.20 (需要 20% 的邻居重合，极少有物品能达到)
+#         ("pa_scl_beta_0.20",
+#          ["--use_pa_scl", "--pa_scl_topk", "5", "--graph_scale_beta", "0.20"]),
+
+#         # 3. 极端的图信号: Beta = 0.30 
+#         ("pa_scl_beta_0.30",
+#          ["--use_pa_scl", "--pa_scl_topk", "5", "--graph_scale_beta", "0.30"]),
+
+#         # 4. 极致退化：纯文本先验 (彻底屏蔽 Graph，Beta设为极大值 999.0)
+#         # 目的：明确界定“到底要不要图先验”。如果这个实验比上面都好，说明图全是噪声；
+#         # 如果这个实验指标下降，说明图先验依然有不可替代的价值！
+#         ("pa_scl_pure_text_prior",
+#          ["--use_pa_scl", "--pa_scl_topk", "5", "--graph_scale_beta", "999.0"]),
+#     ]),
+# ]
+
+
+# EXPERIMENT_GROUPS = [
+#     ("PA-SCL: Round 2 - Text Sharpness Gamma Ablation", [
+        
+#         # 这里请把 graph_scale_beta 换成你在第一轮跑出来的【最优值】(假设是 0.15)
+        
+#         # 1. 彻底不锐化文本: Gamma = 1.0 (保持原始分布)
+#         ("pa_scl_gamma_1.0",
+#          ["--use_pa_scl", "--pa_scl_topk", "5", "--graph_scale_beta", "0.15", "--text_sharpen_gamma", "1.0"]),
+
+#         # 2. 轻微锐化: Gamma = 2
+#         ("pa_scl_gamma_2.0",
+#          ["--use_pa_scl", "--pa_scl_topk", "5", "--graph_scale_beta", "0.15", "--text_sharpen_gamma", "2.0"]),
+
+#         # 3. 中度锐化: Gamma = 3
+#         ("pa_scl_gamma_3.0",
+#          ["--use_pa_scl", "--pa_scl_topk", "5", "--graph_scale_beta", "0.15", "--text_sharpen_gamma", "3.0"]),
+
+#         # 4. 略高于中度: Gamma = 4
+#         ("pa_scl_gamma_4.0",
+#          ["--use_pa_scl", "--pa_scl_topk", "5", "--graph_scale_beta", "0.15", "--text_sharpen_gamma", "4.0"]),
+#     ]),
+# ]
+
+
+# EXPERIMENT_GROUPS = [
+#     ("PA-SCL: Round 3 - Top-K Neighborhood Bandwidth", [
+        
+#         # 填入前两轮的最优参数，假设是 beta=0.15, gamma=2.0
+        
+#         # 1. K=2 (极其克制的微弱软目标)
+#         ("pa_scl_topk_1",
+#          ["--use_pa_scl", "--graph_scale_beta", "0.05", "--text_sharpen_gamma", "2.0", "--pa_scl_topk", "1"]),
+
+#         # 2. K=3 (通常是图结构中经典的最近邻取值)
+#         ("pa_scl_topk_3",
+#          ["--use_pa_scl", "--graph_scale_beta", "0.05", "--text_sharpen_gamma", "2.0", "--pa_scl_topk", "3"]),
+
+#         # 3. K=7 (稍微放宽)
+#         ("pa_scl_topk_7",
+#          ["--use_pa_scl", "--graph_scale_beta", "0.05", "--text_sharpen_gamma", "2.0", "--pa_scl_topk", "7"]),
+
+#         # 4. K=10 (过度模糊的流形，测试抗干扰极限)
+#         ("pa_scl_topk_10",
+#          ["--use_pa_scl", "--graph_scale_beta", "0.05", "--text_sharpen_gamma", "2.0", "--pa_scl_topk", "10"]),
+#     ]),
+# ]
+
+
+
+# 测试到的最优：beta：0.1最好  gamma：3  K=5
+
+
 
 EXPERIMENT_NAME_ALIASES = {}
 

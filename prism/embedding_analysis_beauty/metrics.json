@@ -1,0 +1,18 @@
+{
+  "num_items_analyzed": 12101,
+  "prism_metrics": {
+    "mean_similarity": 0.11719296872615814,
+    "std_similarity": 0.18743906915187836,
+    "max_similarity": 0.9265303611755371,
+    "min_similarity": -0.6369572281837463,
+    "diversity": 0.8828070312738419
+  },
+  "tiger_metrics": {
+    "mean_similarity": 0.2188156396150589,
+    "std_similarity": 0.18757587671279907,
+    "max_similarity": 0.8982297778129578,
+    "min_similarity": -0.41220468282699585,
+    "diversity": 0.7811843603849411
+  },
+  "improvement_diversity_pct": 13.0087948559063
+}

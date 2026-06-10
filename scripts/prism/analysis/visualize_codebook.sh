@@ -12,7 +12,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 # Model paths (relative to project root)
-TIGER_MODEL="$PROJECT_ROOT/output/tiger_tokenizer/beauty/3-256-32-ema-only-5-core-items/final_model.pt"
+# TIGER_MODEL="$PROJECT_ROOT/output/tiger_tokenizer/beauty/3-256-32-ema-only-5-core-items/final_model.pt"
+TIGER_MODEL="$PROJECT_ROOT/output/prism_tokenizer/beauty/single_exp_cma-only/best_model.pt"
 PRISM_MODEL="$PROJECT_ROOT/output/prism_tokenizer/beauty/hparam_stage1_PASCL/pa_scl_text_dominant/best_model.pt"
 
 # Output path (without extension)

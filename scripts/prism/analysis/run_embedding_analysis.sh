@@ -25,7 +25,7 @@ DATASET="beauty"
 
 # Model checkpoints
 PRISM_CHECKPOINT="scripts/output/recommender/prism/beauty/hparam_stage2_PASCL/pa_scl_text_dominant/best_model.pt"
-TIGER_CHECKPOINT="scripts/output/recommender/tiger/beauty/2026-01-06-22-02-28_3layer-tiger/best_model.pt"
+TIGER_CHECKPOINT="scripts/output/recommender/prism/beauty/hparam_stage2_ide_cma/full/best_model.pt"
 
 # Output directory
 OUTPUT_DIR="prism/embedding_analysis_${DATASET}"
