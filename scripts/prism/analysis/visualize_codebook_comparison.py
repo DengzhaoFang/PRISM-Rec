@@ -56,8 +56,7 @@ plt.rcParams.update({
 })
 
 # Okabe-Ito colorblind-friendly palette (KDD/NeurIPS standard)
-_BASE_COLORS = ['#009E73', '#D55E00', '#0072B2', '#CC79A7', '#F0E442', '#56B4E9']
-LAYER_COLORS = _BASE_COLORS  # extended on demand in plot_comparison
+LAYER_COLORS = ['#009E73', '#D55E00', '#0072B2']  # Teal, Vermillion, Blue
 
 
 def load_codebooks_from_checkpoint(checkpoint_path: str) -> List[np.ndarray]:
@@ -89,8 +88,6 @@ def load_codebooks_from_checkpoint(checkpoint_path: str) -> List[np.ndarray]:
                 break
         if codebook is None:
             raise ValueError(f"Cannot find codebook for layer {layer_idx}")
-        codebooks.append(codebook)
-        
         codebooks.append(codebook)
         print(f"  Layer {layer_idx}: shape = {codebook.shape}")
     
@@ -164,9 +161,9 @@ def plot_comparison(
     prism_2d, prism_labels = prepare_tsne_data(prism_codebooks, perplexity, n_iter, init)
     
     n_layers = len(tiger_codebooks)
-    colors = _BASE_COLORS
-    if n_layers > len(colors):
-        colors = [_BASE_COLORS[i % len(_BASE_COLORS)] for i in range(n_layers)]
+    colors = list(LAYER_COLORS)
+    while len(colors) < n_layers:
+        colors.append(colors[len(colors) % len(LAYER_COLORS)])
 
     # Create figure with GridSpec for precise layout control
     # Reduced figure size for better paper integration while maintaining clarity
