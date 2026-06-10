@@ -77,13 +77,18 @@ def load_codebooks_from_checkpoint(checkpoint_path: str) -> List[np.ndarray]:
     n_layers = config.get('n_layers', 3)
     
     for layer_idx in range(n_layers):
-        key = f'quantizers.{layer_idx}.embedding'
-        if key in state_dict:
-            codebook = state_dict[key].numpy()
-        elif f'quantizers.{layer_idx}.embedding.weight' in state_dict:
-            codebook = state_dict[f'quantizers.{layer_idx}.embedding.weight'].numpy()
-        else:
+        codebook = None
+        for key_fmt in [
+            f'quantizers.{layer_idx}.embedding',
+            f'quantizers.{layer_idx}.embedding.weight',
+            f'rq.quantizers.{layer_idx}.embedding.weight',   # Letter/LETTER format
+        ]:
+            if key_fmt in state_dict:
+                codebook = state_dict[key_fmt].numpy()
+                break
+        if codebook is None:
             raise ValueError(f"Cannot find codebook for layer {layer_idx}")
+        codebooks.append(codebook)
         
         codebooks.append(codebook)
         print(f"  Layer {layer_idx}: shape = {codebook.shape}")
@@ -236,7 +241,7 @@ def plot_comparison(
         ax.set_title(title, fontsize=7, fontweight='normal', pad=2, y=-0.06)
     
     # Plot both
-    plot_scatter(ax_tiger, tiger_2d, tiger_labels, 'TIGER Codebook')
+    plot_scatter(ax_tiger, tiger_2d, tiger_labels, 'UNGER Codebook')
     plot_scatter(ax_prism, prism_2d, prism_labels, 'ADSA Codebook')
     
     # Tight layout with minimal padding to eliminate white borders
