@@ -961,20 +961,41 @@ def main():
     )
     logger.info(f"  TIGER mapper: {len(tiger_semantic_mapper.item_to_codes)} items")
     
-    # Load content and collab embeddings (shared between models)
+    # Load PURIFIED content/collab (128D) from Stage1 for PRISM fusion module.
+    # Raw 768D Sentence-T5 won't work — MoEFusion expects IDE projections (128D).
     data_dir = prism_config['data'].sequence_data_path
-    content_embs_dict = load_content_embeddings(data_dir)
+    content_embs_dict = load_content_embeddings(data_dir)  # raw 768D, for TIGER
     collab_path = getattr(prism_config['data'], 'collab_embedding_path', None)
     if not collab_path:
         collab_path = os.path.join(data_dir, 'lightgcn', 'item_embeddings_collab.npy')
-    collab_embs_dict = load_collab_embeddings(collab_path, data_dir)
+    collab_embs_dict_raw = load_collab_embeddings(collab_path, data_dir)  # raw 64D, for TIGER
+
+    # For PRISM: load 128D purified embeddings from Stage1 output
+    semantic_mapping_dir = Path(prism_config['data'].semantic_mapping_path).parent
+    purified_content_path = semantic_mapping_dir / 'item_purified_content.npy'
+    purified_collab_path = semantic_mapping_dir / 'item_purified_collab.npy'
+    purified_ids_path = semantic_mapping_dir / 'item_purified_ids.npy'
+
+    if purified_content_path.exists() and purified_ids_path.exists():
+        purified_content_arr = np.load(str(purified_content_path))
+        purified_collab_arr = np.load(str(purified_collab_path)) if purified_collab_path.exists() else None
+        purified_ids = np.load(str(purified_ids_path))
+        content_embs_dict_purified = {int(purified_ids[i]): purified_content_arr[i].astype(np.float32) for i in range(len(purified_ids))}
+        collab_embs_dict_purified = {}
+        if purified_collab_arr is not None:
+            collab_embs_dict_purified = {int(purified_ids[i]): purified_collab_arr[i].astype(np.float32) for i in range(len(purified_ids))}
+        logger.info(f"Loaded {len(content_embs_dict_purified)} purified content embeddings (128D)")
+    else:
+        content_embs_dict_purified = content_embs_dict
+        collab_embs_dict_purified = collab_embs_dict_raw
     
     # Load codebook embeddings (for improved projection mode)
     semantic_mapping_dir = Path(prism_config['data'].semantic_mapping_path).parent
     codebook_embs_dict, _ = load_codebook_mappings(str(semantic_mapping_dir))
     
-    logger.info(f"Loaded {len(content_embs_dict)} content embeddings")
-    logger.info(f"Loaded {len(collab_embs_dict)} collab embeddings")
+    logger.info(f"Loaded {len(content_embs_dict)} raw content embeddings (768D)")
+    logger.info(f"Loaded {len(content_embs_dict_purified)} purified content embeddings (128D)")
+    logger.info(f"Loaded {len(collab_embs_dict_purified)} purified collab embeddings (128D)")
     logger.info(f"Loaded {len(codebook_embs_dict)} codebook embeddings")
     
     # Get all item IDs from BOTH semantic mappers
@@ -997,10 +1018,11 @@ def main():
         logger.info(f"Item {item_id}: PRISM={prism_codes}, TIGER={tiger_codes} [{same}]")
     logger.info("="*80 + "\n")
     
-    # Filter to only items that have both content and collab embeddings
+    # Filter to only items that have purified content+collab AND raw content+collab
     valid_item_ids = [
         str(item_id) for item_id in common_item_ids
-        if item_id in content_embs_dict and item_id in collab_embs_dict
+        if (item_id in content_embs_dict_purified and item_id in collab_embs_dict_purified
+            and item_id in content_embs_dict and item_id in collab_embs_dict_raw)
     ]
     
     logger.info(f"Found {len(valid_item_ids)} items with complete embedding info")
@@ -1018,10 +1040,10 @@ def main():
     # Extract embeddings
     logger.info("Extracting embeddings...")
     prism_embeddings, prism_valid_ids = analyzer.extract_embeddings(
-        sampled_item_ids, prism_semantic_mapper, content_embs_dict, collab_embs_dict, codebook_embs_dict, 'prism'
+        sampled_item_ids, prism_semantic_mapper, content_embs_dict_purified, collab_embs_dict_purified, codebook_embs_dict, 'prism'
     )
     tiger_embeddings, tiger_valid_ids = analyzer.extract_embeddings(
-        sampled_item_ids, tiger_semantic_mapper, content_embs_dict, collab_embs_dict, codebook_embs_dict, 'tiger'
+        sampled_item_ids, tiger_semantic_mapper, content_embs_dict, collab_embs_dict_raw, codebook_embs_dict, 'tiger'
     )
     
     # Use intersection of valid IDs
